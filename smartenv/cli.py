@@ -9,8 +9,9 @@ from __future__ import annotations
 
 import argparse
 import sys
+import types
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple, Union, get_args, get_origin
 
 from smartenv.sources import resolve_source
 from smartenv.validators import Validator, validate
@@ -63,6 +64,18 @@ def _load_sources(sources: Sequence[str]) -> Dict[str, str]:
 
 def _type_label(type_hint: Any) -> str:
     """Format a schema type for an example-file comment."""
+    origin = get_origin(type_hint)
+    arguments = get_args(type_hint)
+    if origin in (Union, getattr(types, "UnionType", Union)):
+        members = [argument for argument in arguments if argument is not type(None)]
+        labels = ", ".join(_type_label(member) for member in members)
+        if len(members) < len(arguments):
+            inner = labels if len(members) == 1 else f"Union[{labels}]"
+            return f"Optional[{inner}]"
+        return f"Union[{labels}]"
+    if origin in (list, dict) and arguments:
+        name = str(type_hint).split("[", 1)[0].replace("typing.", "")
+        return f"{name}[{', '.join(_type_label(argument) for argument in arguments)}]"
     if isinstance(type_hint, type):
         return type_hint.__name__
     return str(type_hint).replace("typing.", "")

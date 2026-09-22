@@ -14,6 +14,14 @@
 
 ## DONE
 
+### Python 3.8 CI correction — COMPLETE (2026-09-21)
+- [x] Diagnosed the initial GitHub Actions failure in run 35681862191: Python 3.8 renders Optional[int] as Union[int, NoneType], breaking the CLI example-file label assertion. Installation, lint and type checking passed; Python 3.9–3.12 jobs passed.
+- [x] smartenv/cli.py — derive Union/Optional labels from typing.get_origin/get_args, including nested list/dict types, instead of relying on Python-version-specific representations. Preserve unsubscripted container labels and support Python 3.10 union notation.
+- [x] tests/test_cli.py — added 11 regression cases for nullable unions, member order, nested containers, Literal, bare containers, and modern union notation.
+- [x] Full Python 3.12.14 regression suite: 364 passed. Black, Ruff, strict mypy (25 source/test files), and git diff --check passed.
+- [x] Full Python 3.8.10 regression suite with coverage: 360 passed, 4 skipped, 92% coverage. Skips are two optional Pydantic tests, one optional watchdog test, and Python 3.10 union notation. The previously failing test now passes on a real Python 3.8 runtime.
+- Local compatibility runtime and dependencies are isolated in ignored .venv/ci-runtimes/python38/. Changes are ready to commit and push; the updated hosted CI run has not occurred yet.
+
 ### Phase 6: Ship — COMPLETE (2026-09-21)
 - [x] README.md — all requested sections, comparison with primary-source references, installation, verified examples, cloud/reload semantics, CLI output, FastAPI/Django integration, contributing and MIT license. Badges distinguish local coverage from hosted CI/publication.
 - [x] pyproject.toml — README registered as project metadata; example environment and workflow files included in source distribution.

@@ -127,6 +127,39 @@ def test_generate_example_typing_labels_and_utf8(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize(
+    ("annotation", "label"),
+    [
+        ("Union[int, None]", "Optional[int]"),
+        ("Union[None, int]", "Optional[int]"),
+        ("Union[int, str]", "Union[int, str]"),
+        ("Union[int, str, None]", "Optional[Union[int, str]]"),
+        ("List[Optional[int]]", "List[Optional[int]]"),
+        ("Optional[List[int]]", "Optional[List[int]]"),
+        ("Dict[str, Optional[int]]", "Dict[str, Optional[int]]"),
+        ("Optional[Literal['dev', 'prod']]", "Optional[Literal['dev', 'prod']]"),
+        ("List", "List"),
+        ("Dict", "Dict"),
+        pytest.param(
+            "int | None",
+            "Optional[int]",
+            marks=pytest.mark.skipif(sys.version_info < (3, 10), reason="Python 3.10 union syntax"),
+        ),
+    ],
+)
+def test_generate_example_stable_union_labels(annotation: str, label: str, tmp_path: Path) -> None:
+    schema = write_file(
+        tmp_path,
+        "schema.py",
+        "from typing import Dict, List, Literal, Optional, Union\n"
+        f"schema = {{'SETTING': {annotation}}}\n",
+    )
+    output = tmp_path / ".env.example"
+
+    assert main(["generate-example", "--schema", str(schema), "--output", str(output)]) == 0
+    assert output.read_text(encoding="utf-8") == f"# SETTING ({label}) [optional]\nSETTING=\n"
+
+
+@pytest.mark.parametrize(
     "key", ["SECRET", "api_key", "Access_Token", "DATABASE_PASSWORD", "DB_PASS", "CREDENTIAL_FILE"]
 )
 def test_list_masks_sensitive_keys(
