@@ -1,0 +1,122 @@
+[build-system]
+requires = ["hatchling>=1.27.0"]
+build-backend = "hatchling.build"
+
+[project]
+name = "smartenv"
+version = "0.1.0"
+description = "Unified, type-safe, multi-source environment and config management for Python"
+readme = "README.md"
+requires-python = ">=3.8"
+license = "MIT"
+license-files = ["LICENSE*"]
+authors = [{ name = "smartenv contributors" }]
+keywords = [
+  "config",
+  "configuration",
+  "dotenv",
+  "env",
+  "environment",
+  "secrets",
+  "settings",
+  "twelve-factor",
+]
+# Zero mandatory runtime dependencies: the core works with the standard library alone.
+dependencies = []
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: OS Independent",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.8",
+  "Programming Language :: Python :: 3.9",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Software Development :: Libraries :: Python Modules",
+  "Topic :: System :: Systems Administration",
+  "Topic :: Utilities",
+  "Typing :: Typed",
+]
+
+[project.optional-dependencies]
+yaml = ["PyYAML>=6.0"]
+toml = ["tomli>=2.0; python_version < '3.11'"]
+watch = ["watchdog>=3.0"]
+aws = ["boto3>=1.26"]
+gcp = ["google-cloud-secret-manager>=2.0"]
+azure = ["azure-keyvault-secrets>=4.0", "azure-identity>=1.0"]
+pydantic = ["pydantic>=2.0"]
+all = ["smartenv[yaml,toml,watch,aws,gcp,azure,pydantic]"]
+dev = ["pytest", "pytest-cov", "pytest-asyncio", "black", "ruff", "mypy"]
+
+[project.scripts]
+smartenv = "smartenv.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["smartenv"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+  "/smartenv",
+  "/tests",
+  "/README.md",
+  "/CHANGELOG.md",
+  "/LICENSE",
+  "/.env.example",
+  "/.github/workflows",
+]
+
+# --- Tooling -----------------------------------------------------------------
+
+[tool.black]
+line-length = 100
+target-version = ["py38"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py38"
+src = ["smartenv", "tests"]
+
+[tool.ruff.lint]
+select = ["B", "C4", "E", "F", "I", "N", "SIM", "UP", "W"]
+
+[tool.ruff.lint.pyupgrade]
+# Keep typing.List/Dict/Optional/Union: annotations of this package stay evaluable
+# at runtime (e.g. dataclasses + typing.get_type_hints) on Python 3.8 and 3.9.
+keep-runtime-typing = true
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["E501"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["smartenv"]
+
+[tool.mypy]
+# The package supports Python 3.8+, but mypy only accepts targets >= 3.10 in
+# recent releases, so 3.8-only syntax rules are enforced by ruff instead.
+python_version = "3.10"
+strict = true
+files = ["smartenv", "tests"]
+show_error_codes = true
+pretty = true
+
+[[tool.mypy.overrides]]
+module = ["boto3.*", "botocore.*", "google.*", "azure.*", "watchdog.*", "yaml.*", "tomli.*"]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+minversion = "7.0"
+testpaths = ["tests"]
+addopts = "-ra --strict-markers --strict-config"
+
+[tool.coverage.run]
+source = ["smartenv"]
+branch = true
+
+[tool.coverage.report]
+show_missing = true
+exclude_lines = ["pragma: no cover", "if TYPE_CHECKING:"]

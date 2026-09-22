@@ -1,0 +1,27 @@
+# === SMARTENV PROJECT RULES ===
+
+# Language & Standards
+- Python 3.8+ compatible. No walrus operator, no match statements.
+- Full type hints on every function/class. Must pass mypy --strict.
+- Google-style docstrings on every public class and method.
+- Zero mandatory runtime dependencies. Cloud/yaml/toml are optional extras.
+- All file I/O uses encoding="utf-8" explicitly.
+- Thread-safe. No global mutable state. Each Env() instance is isolated.
+
+# Code Style
+- Format with black, lint with ruff
+- Use conventional commits
+
+# Workflow
+- Before implementing, briefly state your plan in 2-3 sentences max.
+- After creating a file, run: python -c "import smartenv" to verify no import errors.
+- After writing tests, run: python -m pytest tests/ -x -v
+- If tests fail, read the error and fix before moving on.
+- Update cline_todo.md after completing each task — move items to DONE.
+- Be concise. Do not over-explain or pad output with commentary.
+
+# Do NOT
+- Do NOT create placeholder or stub files — every file must be complete.
+- Do NOT leave "# TODO" comments.
+- Do NOT ask me questions — make decisions yourself using best practices.
+- Do NOT modify files outside the smartenv/ project directory.
