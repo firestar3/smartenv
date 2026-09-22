@@ -31,6 +31,8 @@
 
 ### Compatibility notes
 
+- PyPI distribution name is `smartenv-config`; Python imports, the CLI and GitHub repository remain `smartenv`.
+
 - `MissingKeyError` now also inherits from `AttributeError` and `KeyError`; missing attributes work with `hasattr` and `getattr` defaults.
 - Failed strict reload reports are carried by the exception, rather than replacing `env.errors` and the active snapshot.
 - In-place edits to containers returned by `Env` no longer mutate its internal configuration.

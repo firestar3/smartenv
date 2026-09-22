@@ -1,6 +1,6 @@
 # smartenv
 
-[![PyPI](https://img.shields.io/pypi/v/smartenv)](https://pypi.org/project/smartenv/)
+[![PyPI](https://img.shields.io/pypi/v/smartenv-config)](https://pypi.org/project/smartenv-config/)
 ![Python 3.8+](https://img.shields.io/badge/python-3.8%2B-blue)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 [![CI](https://github.com/firestar3/smartenv/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/firestar3/smartenv/actions/workflows/ci.yml)
@@ -46,12 +46,13 @@ Sources: [python-dotenv documentation](https://bbc2.github.io/python-dotenv/),
 
 ## Install
 
-After the package is published to PyPI:
+The PyPI distribution is named **`smartenv-config`**. Python imports and the CLI
+remain `smartenv`. After publication, install it with:
 
 ```bash
-pip install smartenv
-pip install "smartenv[yaml,aws]"
-pip install "smartenv[all]"
+pip install smartenv-config
+pip install "smartenv-config[yaml,aws]"
+pip install "smartenv-config[all]"
 ```
 
 To use this checkout now, run `python -m pip install -e .` from the project directory.
@@ -308,7 +309,7 @@ provider's configuration. An async wrapper does not make the SDK itself asynchro
 
 ## Hot Reload
 
-Install `smartenv[watch]`, then enable file watching and keep the process running:
+Install `smartenv-config[watch]`, then enable file watching and keep the process running:
 
 ```python
 import time

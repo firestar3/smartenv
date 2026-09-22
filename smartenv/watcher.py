@@ -72,7 +72,8 @@ class FileWatcher:
                     from watchdog.observers import Observer
                 except ImportError as exc:
                     raise ImportError(
-                        "hot reload requires watchdog; install it with: pip install smartenv[watch]"
+                        "hot reload requires watchdog; "
+                        "install it with: pip install smartenv-config[watch]"
                     ) from exc
 
                 observer = Observer()

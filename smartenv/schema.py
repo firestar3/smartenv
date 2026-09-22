@@ -74,7 +74,7 @@ def normalize_schema(schema: Any) -> Dict[str, Any]:
     described = schema.__name__ if isinstance(schema, type) else type(schema).__name__
     raise TypeError(
         f"schema must be a mapping of key to type or a pydantic model class, got {described!r}; "
-        "pydantic models need the optional dependency (pip install smartenv[pydantic])"
+        "pydantic models need the optional dependency (pip install smartenv-config[pydantic])"
     )
 
 

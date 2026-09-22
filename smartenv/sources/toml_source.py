@@ -13,7 +13,7 @@ __all__ = ["TomlSource"]
 
 _MISSING_PARSER_MESSAGE = (
     "TOML support requires the standard library 'tomllib' module (Python 3.11+) or "
-    "the 'tomli' package on older interpreters; install it with: pip install smartenv[toml]"
+    "the 'tomli' package on older interpreters; install it with: pip install smartenv-config[toml]"
 )
 
 

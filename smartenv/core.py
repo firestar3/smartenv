@@ -575,7 +575,7 @@ class Env:
         except ImportError as exc:
             self._add_warning(
                 f"hot_reload requested but the watcher is unavailable ({exc}); "
-                "install it with: pip install smartenv[watch]"
+                "install it with: pip install smartenv-config[watch]"
             )
             return
         try:

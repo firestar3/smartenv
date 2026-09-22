@@ -7,6 +7,11 @@ and the verification and publishing jobs succeed.
 The examples below use the existing Windows checkout and virtual environment. On other
 machines, replace `.\.venv\Scripts\python.exe` with your environment's Python interpreter.
 
+The PyPI distribution name is **`smartenv-config`** because PyPI rejected `smartenv`
+as too similar to an existing project. The GitHub repository, Python import package
+and CLI command remain `smartenv`. An absent PyPI project page does not guarantee
+that a name will pass its registration rules.
+
 ## 1. Verify the release locally
 
 `smartenv/_version.py` is the version source for runtime and package metadata. Update it
@@ -21,10 +26,10 @@ cd C:\Users\aarav\smartenv
 .\.venv\Scripts\python.exe -m mypy smartenv tests scripts
 .\.venv\Scripts\python.exe -m pytest tests/ -v --tb=short --cov=smartenv
 .\.venv\Scripts\python.exe -m pytest --doctest-modules smartenv -q
-.\.venv\Scripts\python.exe -m build --outdir dist/1.0.0
-.\.venv\Scripts\python.exe -m twine check --strict dist/1.0.0/*
-.\.venv\Scripts\python.exe scripts/check_release.py --dist-dir dist/1.0.0 --tag v1.0.0
-.\.venv\Scripts\python.exe scripts/smoke_wheel.py --dist-dir dist/1.0.0 --work-dir .venv
+.\.venv\Scripts\python.exe -m build --outdir dist/smartenv-config/1.0.0
+.\.venv\Scripts\python.exe -m twine check --strict dist/smartenv-config/1.0.0/*
+.\.venv\Scripts\python.exe scripts/check_release.py --dist-dir dist/smartenv-config/1.0.0 --tag v1.0.0
+.\.venv\Scripts\python.exe scripts/smoke_wheel.py --dist-dir dist/smartenv-config/1.0.0 --work-dir .venv
 ```
 
 ## 2. Push the implementation to GitHub
@@ -67,14 +72,14 @@ and add a pending GitHub publisher with these exact values:
 
 | Field | Value |
 | --- | --- |
-| PyPI project name | `smartenv` |
+| PyPI project name | `smartenv-config` |
 | Owner | `firestar3` |
 | Repository name | `smartenv` |
 | Workflow filename | `publish.yml` |
 | Environment name | `pypi` |
 
 The first successful publication creates the project. A pending publisher does not reserve
-the name. If `smartenv` is already a project you own, add the publisher in that project's
+the name. If `smartenv-config` is already a project you own, add the publisher in that project's
 Publishing settings instead. If another account owns the name, choose an available package
 name and update the metadata and release configuration before proceeding.
 [PyPI's new-project guide](https://docs.pypi.org/trusted-publishers/creating-a-project-through-oidc/)
@@ -111,12 +116,12 @@ logs rather than assuming that creating the tag was sufficient.
 
 ## 5. Verify the published package
 
-Confirm the version and project links on [smartenv's PyPI page](https://pypi.org/project/smartenv/).
+Confirm the version and project links on [smartenv's PyPI page](https://pypi.org/project/smartenv-config/).
 Use a fresh environment with isolated imports for the final installation check:
 
 ```powershell
 .\.venv\Scripts\python.exe -m venv .venv\pypi-check-1.0.0
-.\.venv\pypi-check-1.0.0\Scripts\python.exe -m pip install --index-url https://pypi.org/simple "smartenv==1.0.0"
+.\.venv\pypi-check-1.0.0\Scripts\python.exe -m pip install --index-url https://pypi.org/simple "smartenv-config==1.0.0"
 .\.venv\pypi-check-1.0.0\Scripts\python.exe -I -c "import smartenv; print(smartenv.__version__)"
 .\.venv\pypi-check-1.0.0\Scripts\python.exe -I -m smartenv --version
 ```
@@ -125,8 +130,8 @@ The isolated interpreter flag prevents imports from this checkout from masking a
 problem. Once publication succeeds, other users can run:
 
 ```bash
-python -m pip install smartenv
-python -m pip install "smartenv[aws,yaml]"
+python -m pip install smartenv-config
+python -m pip install "smartenv-config[aws,yaml]"
 ```
 
 Optionally create a GitHub Release for `v1.0.0` and copy the corresponding changelog section.

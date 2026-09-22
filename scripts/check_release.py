@@ -36,12 +36,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     sdists = list(args.dist_dir.glob("*.tar.gz"))
     if len(wheels) != 1 or len(sdists) != 1:
         parser.error("the distribution directory must contain exactly one wheel and one sdist")
-    expected = f"smartenv-{version}"
+    expected = f"smartenv_config-{version}"
     assert wheels[0].name == f"{expected}-py3-none-any.whl", "Unexpected wheel name"
     assert sdists[0].name == f"{expected}.tar.gz", "Unexpected source archive name"
     with zipfile.ZipFile(wheels[0]) as wheel:
         metadata = email.message_from_bytes(wheel.read(f"{expected}.dist-info/METADATA"))
-        assert metadata["Name"] == "smartenv"
+        assert metadata["Name"] == "smartenv-config"
         assert metadata["Version"] == version
         assert metadata["Description-Content-Type"] == "text/markdown"
         assert all(

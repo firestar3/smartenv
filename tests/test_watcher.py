@@ -304,11 +304,11 @@ def test_missing_watchdog_explains_extra(
 ) -> None:
     env, path = config
     monkeypatch.setitem(sys.modules, "watchdog.events", None)
-    with pytest.raises(ImportError, match=r"pip install smartenv\[watch\]"):
+    with pytest.raises(ImportError, match=r"pip install smartenv-config\[watch\]"):
         FileWatcher(env, [str(path)]).start()
     with Env({"PORT": int}, sources=[str(path)], hot_reload=True) as watched:
         assert watched.watcher is None
-        assert any("pip install smartenv[watch]" in warning for warning in watched.warnings)
+        assert any("pip install smartenv-config[watch]" in warning for warning in watched.warnings)
 
 
 def test_empty_file_list_needs_no_dependency_or_threads(

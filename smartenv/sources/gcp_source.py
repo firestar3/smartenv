@@ -1,4 +1,4 @@
-"""Google Secret Manager source (requires the ``smartenv[gcp]`` extra).
+"""Google Secret Manager source (requires the ``smartenv-config[gcp]`` extra).
 
 :class:`GcpSource` reads one secret version (or one version of every secret when
 no ``secret_id`` is given) from Google Secret Manager::
@@ -89,7 +89,7 @@ class GcpSource(CloudSource):
                 message=(
                     "the gcp_secrets source needs google-cloud-secret-manager, "
                     f"which is unavailable ({exc}); install it with: "
-                    "pip install smartenv[gcp]"
+                    "pip install smartenv-config[gcp]"
                 ),
             ) from exc
         if not self.project_id.strip():

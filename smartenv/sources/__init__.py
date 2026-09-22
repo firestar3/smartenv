@@ -52,9 +52,9 @@ else:
     PathSpec = Union[str, os.PathLike]
 
 _CLOUD_SOURCES: Dict[str, Tuple[str, str, str]] = {
-    "aws_secrets": ("smartenv.sources.aws_source", "AwsSource", "smartenv[aws]"),
-    "gcp_secrets": ("smartenv.sources.gcp_source", "GcpSource", "smartenv[gcp]"),
-    "azure_secrets": ("smartenv.sources.azure_source", "AzureSource", "smartenv[azure]"),
+    "aws_secrets": ("smartenv.sources.aws_source", "AwsSource", "smartenv-config[aws]"),
+    "gcp_secrets": ("smartenv.sources.gcp_source", "GcpSource", "smartenv-config[gcp]"),
+    "azure_secrets": ("smartenv.sources.azure_source", "AzureSource", "smartenv-config[azure]"),
 }
 """Cloud provider names mapped to ``(module, class, extra)`` tuples."""
 

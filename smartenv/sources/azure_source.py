@@ -1,4 +1,4 @@
-"""Azure Key Vault source (requires the ``smartenv[azure]`` extra).
+"""Azure Key Vault source (requires the ``smartenv-config[azure]`` extra).
 
 :class:`AzureSource` reads one or more secrets from an Azure Key Vault and
 serves them as a flat configuration mapping::
@@ -85,7 +85,7 @@ class AzureSource(CloudSource):
                 message=(
                     "the azure_secrets source needs azure-keyvault-secrets and "
                     f"azure-identity, which are unavailable ({exc}); install "
-                    "them with: pip install smartenv[azure]"
+                    "them with: pip install smartenv-config[azure]"
                 ),
             ) from exc
         if not self.vault_url.strip():

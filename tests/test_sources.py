@@ -620,7 +620,7 @@ def test_resolve_source_imports_cloud_sources_lazily(provider: str) -> None:
         source = resolve_source(provider)
     except ImportError as exc:
         assert provider in str(exc)
-        assert "pip install smartenv[" in str(exc)
+        assert "pip install smartenv-config[" in str(exc)
         return
 
     assert isinstance(source, BaseSource)

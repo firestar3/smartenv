@@ -3,7 +3,7 @@ requires = ["hatchling>=1.27.0"]
 build-backend = "hatchling.build"
 
 [project]
-name = "smartenv"
+name = "smartenv-config"
 dynamic = ["version"]
 description = "Unified, type-safe, multi-source environment and config management for Python"
 readme = "README.md"
@@ -50,7 +50,7 @@ aws = ["boto3>=1.26"]
 gcp = ["google-cloud-secret-manager>=2.0"]
 azure = ["azure-keyvault-secrets>=4.0", "azure-identity>=1.0"]
 pydantic = ["pydantic>=2.0"]
-all = ["smartenv[yaml,toml,watch,aws,gcp,azure,pydantic]"]
+all = ["smartenv-config[yaml,toml,watch,aws,gcp,azure,pydantic]"]
 dev = [
   "pytest>=7.4,<10",
   "pytest-cov>=4,<8",

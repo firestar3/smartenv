@@ -1,5 +1,13 @@
 # SMARTENV Build Tracker
 
+## PyPI project-name correction — COMPLETE (2026-09-21)
+
+- [x] PyPI rejected `smartenv` as too similar to an existing project. Changed the distribution name to `smartenv-config`; the GitHub repository, Python import package and CLI remain `smartenv`.
+- [x] Updated optional-extra dependencies and installation hints, matching regression assertions, PyPI badge/link, publishing environment URL, archive checks and release instructions.
+- [x] Built renamed 1.0.0 archives under dist/smartenv-config/1.0.0, separate from the earlier-name builds. Strict metadata/archive checks and a fresh wheel installation passed.
+- [x] Full regression suite: 447 passed. Black, Ruff and strict mypy passed.
+- PyPI's public JSON API returned 404 for smartenv-config; this does not guarantee name acceptance or reserve it. The maintainer must register this exact project name in the pending publisher, push the correction, then publish the matching tag after CI passes. No remote changes or publication were performed.
+
 ## Current release: 1.0.0 — IMPLEMENTATION COMPLETE (2026-09-21)
 
 This release section supersedes the historical behavior and tooling notes below.

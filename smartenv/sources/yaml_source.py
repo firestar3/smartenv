@@ -10,7 +10,7 @@ from smartenv.sources.base import FileSource, flatten_mapping
 __all__ = ["YamlSource"]
 
 _MISSING_PARSER_MESSAGE = (
-    "YAML support requires the 'PyYAML' package; install it with: pip install smartenv[yaml]"
+    "YAML support requires the 'PyYAML' package; install it with: pip install smartenv-config[yaml]"
 )
 
 try:

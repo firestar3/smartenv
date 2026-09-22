@@ -13,7 +13,7 @@ validate it before it reaches your code::
     env.dict()                # {"PORT": 8080, "DEBUG": True}
 
 There are no mandatory dependencies: PyYAML, watchdog, tomli, pydantic and the
-cloud SDKs are optional extras (``pip install smartenv[yaml]``, ...). The
+cloud SDKs are optional extras (``pip install smartenv-config[yaml]``, ...). The
 ``TomlSource`` and ``YamlSource`` classes are available from
 :mod:`smartenv.sources` and are imported on first use.
 

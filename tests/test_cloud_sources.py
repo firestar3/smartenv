@@ -591,7 +591,7 @@ def test_aws_source_without_boto3_hint(monkeypatch: pytest.MonkeyPatch) -> None:
     with pytest.raises(CloudAuthError) as excinfo:
         source.load()
 
-    assert "pip install smartenv[aws]" in str(excinfo.value)
+    assert "pip install smartenv-config[aws]" in str(excinfo.value)
 
 
 def test_aws_source_nested_json_is_flattened(
@@ -886,7 +886,7 @@ def test_gcp_source_without_sdk_hint(monkeypatch: pytest.MonkeyPatch) -> None:
     with pytest.raises(CloudAuthError) as excinfo:
         source.load()
 
-    assert "pip install smartenv[gcp]" in str(excinfo.value)
+    assert "pip install smartenv-config[gcp]" in str(excinfo.value)
 
 
 def test_gcp_source_missing_project_fails_before_request(
@@ -1120,7 +1120,7 @@ def test_azure_source_without_sdk_hint(monkeypatch: pytest.MonkeyPatch) -> None:
     with pytest.raises(CloudAuthError) as excinfo:
         source.load()
 
-    assert "pip install smartenv[azure]" in str(excinfo.value)
+    assert "pip install smartenv-config[azure]" in str(excinfo.value)
 
 
 def test_azure_source_missing_vault_fails_before_request(

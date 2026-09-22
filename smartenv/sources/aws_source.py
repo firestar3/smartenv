@@ -1,4 +1,4 @@
-"""AWS Secrets Manager source (requires the ``smartenv[aws]`` extra).
+"""AWS Secrets Manager source (requires the ``smartenv-config[aws]`` extra).
 
 :class:`AwsSource` reads a single secret from AWS Secrets Manager and turns it
 into a flat configuration mapping::
@@ -86,7 +86,7 @@ class AwsSource(CloudSource):
                 "aws",
                 message=(
                     "the aws_secrets source needs boto3, which is unavailable "
-                    f"({exc}); install it with: pip install smartenv[aws]"
+                    f"({exc}); install it with: pip install smartenv-config[aws]"
                 ),
             ) from exc
         if not self.secret_name.strip():
