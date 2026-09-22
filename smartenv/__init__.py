@@ -29,6 +29,7 @@ Example:
 
 from __future__ import annotations
 
+from smartenv._version import __version__
 from smartenv.casters import FALSE_VALUES, TRUE_VALUES, can_cast, cast
 from smartenv.core import Env
 from smartenv.exceptions import (
@@ -51,8 +52,6 @@ from smartenv.sources import (
     resolve_source,
 )
 from smartenv.validators import ValidationResult, validate, validate_or_raise
-
-__version__ = "0.1.0"
 
 __all__ = [
     "FALSE_VALUES",

@@ -1,10 +1,10 @@
 # smartenv
 
-[![PyPI: release pending](https://img.shields.io/badge/PyPI-release_pending-lightgrey)](#install)
+[![PyPI](https://img.shields.io/pypi/v/smartenv)](https://pypi.org/project/smartenv/)
 ![Python 3.8+](https://img.shields.io/badge/python-3.8%2B-blue)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
-[![CI: workflow configured](https://img.shields.io/badge/CI-workflow_configured-blue)](.github/workflows/ci.yml)
-[![Coverage: 92% local](https://img.shields.io/badge/coverage-92%25_local-brightgreen)](#contributing)
+[![CI](https://github.com/firestar3/smartenv/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/firestar3/smartenv/actions/workflows/ci.yml)
+[![Coverage floor: 90%](https://img.shields.io/badge/coverage_floor-90%25-blue)](pyproject.toml)
 
 **One library to load, validate, and manage all your config — everywhere.**
 
@@ -12,10 +12,12 @@ Combine environment variables, local files, and cloud secrets in one explicit pr
 Declare your types once, catch configuration errors at startup, and access real Python values.
 The core uses only the standard library; optional integrations load when you use them.
 
-Version 0.1.0 is an initial release. The badges above describe the supplied release tooling;
-they do not claim a completed PyPI publication or a passing hosted CI run.
-The local release check passed 353 tests with 92% combined statement and branch coverage
-on Python 3.12.14 (Windows); the CI matrix covers Python 3.8–3.12.
+Version 1.0 adds atomic reload rollback, explicit defaults, source provenance, expiring cloud
+caches, and safer diagnostics. Python 3.8–3.14 is covered by the CI configuration, with
+Windows and macOS checks on Python 3.12. The coverage badge describes the enforced minimum;
+the CI and PyPI badges report their respective services.
+
+Upgrading from 0.1? Read [the migration guide](docs/MIGRATING.md).
 
 ## Why smartenv?
 
@@ -104,6 +106,27 @@ Only keys declared in `schema` are exposed. Keys become required only when named
 `required`; `Optional[int]` describes an allowed value type, not presence. `Env(schema)`
 defaults to the `os` source. Use `env.dict()` for a snapshot and `env.json()` for JSON
 serialization of JSON-compatible values. These exports contain the actual values.
+Use `env.dict(redact=True)` or `env.json(redact=True)` for key-based masking when inspecting
+configuration. See [Security](SECURITY.md) for the limits of that masking.
+
+Explicit defaults are cast and validated like source values, with the lowest priority:
+
+```python
+env = Env(
+    {"PORT": int, "DEBUG": bool},
+    sources=["os"],
+    defaults={"PORT": 8000, "DEBUG": False},
+    strict=True,
+)
+print(env.get_source("PORT"))  # "os" if set there, otherwise "defaults"
+```
+
+`get_source(key)` returns the winning source's name. A missing resolved key raises
+`MissingKeyError`, which is also an `AttributeError` and `KeyError`, so `hasattr`,
+`getattr(env, "MISSING", fallback)`, and standard missing-key handling work normally.
+Use brackets for keys that overlap API names such as `env["sources"]` or contain dashes.
+Returned builtin containers are copied; custom objects returned by casters should be
+treated as immutable.
 
 ## Source Fallback Chain
 
@@ -125,9 +148,10 @@ highest priority                                  lowest priority
 ```
 
 Built-in source strings are `os`, `.env` paths, `.json`, `.toml`, `.yaml` / `.yml`,
-`aws_secrets`, `gcp_secrets`, and `azure_secrets`. For named dotenv variants such as
-`.env.production`, pass `DotenvSource(".env.production")` directly. Source objects are
-also accepted, making custom `BaseSource` subclasses straightforward to add.
+`aws_secrets`, `gcp_secrets`, and `azure_secrets`. Named dotenv variants such as
+`.env.production`, `pathlib.Path` instances, and source objects are also accepted.
+Custom `BaseSource` subclasses need a `name` property and a `load()` method returning
+a flat mapping of key names to string values.
 
 JSON, TOML, and YAML mappings are flattened into uppercase keys separated by `__`.
 For example, `{"database": {"host": "localhost"}}` becomes `DATABASE__HOST=localhost`.
@@ -210,8 +234,11 @@ env = Env(
 ```
 
 A validator can return `True` or `None` for success, `False` for failure, or an explanatory
-string. Exceptions from validators become validation errors. Configuration and cast errors
-may include raw values; keep exception reports out of public responses.
+string. Exceptions from validators become validation errors. Each schema value is cast
+once per load, and that result is passed to its validator and exposed by `Env`.
+Sensitive key names are masked in cast and validator display messages. Raw exception
+attributes, chained exceptions, and values under unrecognized names may still contain
+secrets; keep full exception reports out of public responses. See [Security](SECURITY.md).
 
 ## Cloud Secrets
 
@@ -225,13 +252,14 @@ in `CloudAuthError`, including a useful install hint when an SDK is missing.
 from smartenv import Env
 from smartenv.sources import AwsSource
 
-aws = AwsSource(secret_name="production/myapp", region="us-east-1")
+aws = AwsSource(secret_name="production/myapp", region="us-east-1", cache_ttl=300)
 env = Env({"DATABASE_URL": str}, sources=["os", aws],
           required=["DATABASE_URL"], strict=True)
 ```
 
 With no explicit arguments, `AwsSource()` reads `AWS_SECRET_NAME` and `AWS_REGION`;
-the region defaults to `us-east-1`.
+the region defaults to `us-east-1`. Both `SecretString` and UTF-8 `SecretBinary` payloads
+are supported; arbitrary binary secrets that are not UTF-8 text are rejected.
 
 **Google Secret Manager** — decode a secret version as a JSON object or expose plain text
 as `SECRET`:
@@ -247,6 +275,9 @@ env = Env({"DATABASE_URL": str}, sources=[gcp],
 
 `GCP_PROJECT_ID` and `GCP_SECRET_ID` provide constructor fallbacks. JSON object payloads
 in AWS and GCP are flattened with the same rules as JSON files.
+Without an explicit secret ID or `GCP_SECRET_ID`, GCP lists and fetches the project's
+secrets. In this mode, plain payloads use each secret's uppercased ID; JSON payloads merge
+their flattened keys. Prefer explicit IDs to limit listing permissions and ambiguous keys.
 
 **Azure Key Vault** — secret names become uppercase keys; values remain their stored text:
 
@@ -269,7 +300,11 @@ Every cloud source supports `await source.aload()`, using a thread-backed wrappe
 the synchronous SDK. Successful results are cached per instance by default; returned
 dictionaries are copies and failed fetches are not cached. Set `cache=False` to fetch on
 every load, or call `source.cache_clear()` before `env.reload()` to refresh cached secrets.
-There is no automatic cloud polling or cache expiry.
+Set `cache_ttl` to a positive number of seconds to expire cached results. Expiration triggers
+a fetch on the next load, not a background poll. The default `cache_ttl=None` caches
+indefinitely. Failed refreshes raise instead of silently serving expired secrets; strict
+`Env` reloads retain their previous configuration. SDK timeouts and retries follow the
+provider's configuration. An async wrapper does not make the SDK itself asynchronous.
 
 ## Hot Reload
 
@@ -297,29 +332,39 @@ with Env(
         pass
 ```
 
-The daemon observer watches each file's parent directory and debounces repeated events
-for 0.5 seconds. A reload reads all sources, validates and casts them, and updates the
-configuration under a lock. The callback runs after a successful reload. Cloud caches
-still apply. Use `env.close()` or the context manager to stop and join the watcher.
+The daemon observer watches each file's parent directory. Reload starts after 0.5 seconds
+without another matching event, including editor saves that replace the file atomically.
+A single worker serializes reloads and callbacks. Reload reads all sources, validates and
+casts them, and atomically publishes the new configuration. The callback runs after a
+successful reload, on the worker thread; keep callbacks short and thread-safe. Cloud caches
+still apply. Use `env.close()` or the context manager to cancel pending reloads and wait for
+active work to finish. A callback may safely call `env.close()` itself.
 Without watchdog, `hot_reload=True` records a warning; check `env.warnings` and `env.watcher`.
-If strict validation fails during a reload, the new values and validation errors remain
-available, the watcher records a warning, and the callback is skipped. A failed validation
-does not restore the previous configuration.
+If strict validation or source loading fails, the previous values, provenance, and validation
+report remain intact. The watcher records a warning and skips the callback; a later valid
+save can recover. Direct `env.reload()` raises the error for the caller to inspect.
+Non-strict validation continues to publish its latest values and error report.
+Use `env.dict()` when several keys must come from the same snapshot: separate attribute
+reads can span a concurrent reload. Callback failures occur after the update and do not
+roll back a successfully published configuration.
 
 ## CLI
 
 The `smartenv` command is included in the base installation. A schema module defines a
-`schema` dictionary, an optional `required` list, and optional `validators` mapping:
+`schema` dictionary and optional `required`, `validators`, and `defaults` values:
 
 ```python
 # schema.py
 schema = {"DATABASE_URL": str, "PORT": int}
 required = ["DATABASE_URL"]
 validators = {"PORT": lambda value: 1 <= value <= 65535}
+defaults = {"PORT": 8000}
 ```
 
 Schema files run as Python code when loaded. Use schema modules you trust. Install the
 `yaml` extra to include `config.yaml` in these examples.
+CLI defaults must name declared schema keys and are validated after source values take
+priority. Generated examples keep values blank, even when defaults are defined.
 
 **Validate** sources against the schema. All validation errors are listed; success exits
 with status 0 and failure with status 1:
@@ -327,6 +372,15 @@ with status 0 and failure with status 1:
 ```console
 $ smartenv validate --schema schema.py --sources .env config.yaml
 ✓ Validation passed
+```
+
+Use `--format json` on `validate` or `list` for machine-readable output:
+
+```console
+$ smartenv validate --schema schema.py --sources .env --format json
+{"valid": true, "errors": [], "warnings": []}
+$ python -m smartenv --version
+smartenv 1.0.0
 ```
 
 If `DATABASE_URL` is absent, the validation output includes:
@@ -350,6 +404,8 @@ DATABASE_URL=
 PORT=
 ```
 
+Existing output files are protected. Pass `--force` to intentionally replace one.
+
 **List** all source values without needing a schema. Earlier sources win. For a file with
 `PORT=8000`, `DEBUG=false`, and `API_KEY` set, representative output is:
 
@@ -360,7 +416,7 @@ DEBUG=false
 PORT=8000
 ```
 
-Any key containing `SECRET`, `KEY`, `TOKEN`, `PASSWORD`, `PASS`, or `CREDENTIAL`
+Any key containing `AUTH`, `CERT`, `CREDENTIAL`, `KEY`, `PASS`, `PRIVATE`, `SECRET`, or `TOKEN`
 (case-insensitive) is masked as `*****`. Values under other names are printed as-is.
 
 **Check a source** using environment-based provider configuration and credentials:
@@ -371,7 +427,9 @@ $ smartenv check-source --source aws_secrets
 ```
 
 On a connection or loading error it prints `✗ Failed: ...` and exits with status 1.
-Use `smartenv --help` or `python -m smartenv.cli --help` for command usage.
+Use `smartenv --help` or `python -m smartenv --help` for command usage. Invalid command
+syntax exits with status 2. The CLI loads every explicitly named source and fails when
+one cannot be loaded, including a missing file.
 
 ## Framework Integration
 
@@ -430,19 +488,22 @@ Fork the repository, clone your fork, and create a branch for the change:
 ```bash
 git switch -c feat/my-change
 python -m pip install -e ".[dev,yaml,toml,watch,pydantic]"
-python -m black smartenv tests
+python -m black smartenv tests scripts
 python -m ruff check .
-python -m mypy smartenv
+python -m mypy smartenv tests scripts
 python -m pytest tests/ -v --tb=short --cov=smartenv
 ```
 
 Read `.clinerules` and `cline_todo.md`, keep Python 3.8 compatibility, and add focused
 tests for behavior changes. Cloud tests use fake SDK clients and require no credentials.
 Use conventional commit messages and open a pull request describing the change and
-the checks you ran. CI runs lint, type checks, and tests on Python 3.8 through 3.12.
+the checks you ran. CI covers Python 3.8 through 3.14 on Linux and Python 3.12 on Windows
+and macOS, with formatting, lint, strict type checks, doctests, a 90% coverage floor,
+and an isolated wheel installation check. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
-Release maintainers can build distributions with `python -m build`. The supplied publish
-workflow uploads tagged `v*.*.*` releases with the repository's `PYPI_TOKEN` secret.
+Release maintainers can follow [the release guide](docs/RELEASING.md). The tagged release
+workflow runs CI and publishes verified distributions through PyPI Trusted Publishing;
+it does not use a stored `PYPI_TOKEN`. A local build does not publish the package.
 
 ## License
 

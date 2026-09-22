@@ -473,11 +473,13 @@ def test_private_attributes_raise_attribute_error() -> None:
     assert hasattr(env, attribute) is False
 
 
-def test_hasattr_propagates_missing_key_error_for_public_names() -> None:
+def test_missing_attributes_follow_standard_python_lookup_behavior() -> None:
     env = Env({"PORT": int}, sources=[])
 
-    with pytest.raises(MissingKeyError):
-        hasattr(env, "PORT")
+    assert hasattr(env, "PORT") is False
+    assert getattr(env, "PORT", 8080) == 8080
+    with pytest.raises(KeyError):
+        env["PORT"]
 
 
 # --- strictness, validators and warnings -------------------------------------
@@ -742,3 +744,228 @@ def test_pydantic_model_can_be_used_as_a_schema() -> None:
 
     assert env.dict() == {"port": 8080, "host": "db"}
     assert env.schema == {"port": int, "host": str}
+
+
+def test_strict_failed_reload_keeps_last_good_snapshot_and_report(tmp_path: Path) -> None:
+    path = write_file(tmp_path, ".env", "PORT=8080\n")
+    seen: List[Env] = []
+    env = Env({"PORT": int}, sources=[str(path)], strict=True, on_reload=seen.append)
+    original_source = env.get_source("PORT")
+
+    path.write_text("PORT=invalid\n", encoding="utf-8")
+    with pytest.raises(ValidationError, match="cannot cast"):
+        env.reload()
+
+    assert env.PORT == 8080
+    assert env.valid is True
+    assert env.errors == []
+    assert env.warnings == []
+    assert env.get_source("PORT") == original_source
+    assert seen == []
+
+    path.write_text("PORT=9090\n", encoding="utf-8")
+    env.reload()
+    assert env.PORT == 9090
+    assert seen == [env]
+
+
+@pytest.mark.parametrize("strict", [True, False])
+def test_source_failure_keeps_previous_snapshot(tmp_path: Path, strict: bool) -> None:
+    path = write_file(tmp_path, "config.json", '{"port": 8080}')
+    env = Env({"PORT": int}, sources=[str(path)], strict=strict)
+    path.write_text("{", encoding="utf-8")
+
+    with pytest.raises(SourceLoadError):
+        env.reload()
+
+    assert env.dict() == {"PORT": 8080}
+    assert env.valid is True
+
+
+def test_custom_caster_runs_once_and_validator_sees_retained_object() -> None:
+    class Value:
+        def __init__(self, value: str) -> None:
+            self.value = value
+
+    cast_values: List[Value] = []
+    validated_values: List[Value] = []
+
+    def convert(value: str) -> Value:
+        converted = Value(value)
+        cast_values.append(converted)
+        return converted
+
+    def check(value: Value) -> bool:
+        validated_values.append(value)
+        return True
+
+    env = Env(
+        {"ITEM": convert}, sources=[MemorySource({"ITEM": "data"})], validators={"ITEM": check}
+    )
+
+    assert len(cast_values) == 1
+    assert env.ITEM is cast_values[0]
+    assert env.ITEM is validated_values[0]
+    env.reload()
+    assert len(cast_values) == 2
+    assert env.ITEM is cast_values[1]
+    assert env.ITEM is validated_values[1]
+
+
+def test_nested_mutable_values_cannot_be_changed_through_accessors() -> None:
+    env = Env({"ITEMS": list}, sources=[MemorySource({"ITEMS": '[{"names": ["original"]}]'})])
+    env.ITEMS[0]["names"].append("attribute")
+    env["ITEMS"][0]["names"].append("item")
+    env.get("ITEMS")[0]["names"].append("get")
+    env.dict()["ITEMS"][0]["names"].append("snapshot")
+
+    assert env.ITEMS == [{"names": ["original"]}]
+
+
+def test_validator_cannot_mutate_committed_builtin_values_later() -> None:
+    validated: List[Any] = []
+
+    def record(value: Any) -> bool:
+        validated.append(value)
+        return True
+
+    env = Env(
+        {"ITEMS": list},
+        sources=[MemorySource({"ITEMS": "one,two"})],
+        validators={"ITEMS": record},
+    )
+    validated[0].append("later")
+
+    assert env.ITEMS == ["one", "two"]
+
+
+def test_env_accepts_path_objects(tmp_path: Path) -> None:
+    path = write_file(tmp_path, ".env.production", "PORT=8080\n")
+
+    env = Env({"PORT": int}, sources=[path])
+
+    assert env.PORT == 8080
+    assert env.get_source("PORT") == ".env.production"
+
+
+def test_defaults_are_cast_validated_and_lower_priority_than_all_sources() -> None:
+    env = Env(
+        {"PORT": int, "HOST": str, "DEBUG": bool},
+        sources=[MemorySource({"PORT": "8080"}, "first"), MemorySource({"HOST": "db"}, "last")],
+        defaults={"PORT": 80, "HOST": "local", "DEBUG": "false", "UNKNOWN": "ignored"},
+        required=["DEBUG"],
+        strict=True,
+    )
+
+    assert env.dict() == {"PORT": 8080, "HOST": "db", "DEBUG": False}
+    assert env.get_source("PORT") == "first"
+    assert env.get_source("HOST") == "last"
+    assert env.get_source("DEBUG") == "defaults"
+    with pytest.raises(MissingKeyError):
+        env.get_source("UNKNOWN")
+
+
+def test_defaults_use_the_same_validation_rules_as_sources() -> None:
+    with pytest.raises(ValidationError, match="cannot cast"):
+        Env({"PORT": int}, sources=[], defaults={"PORT": "bad"}, strict=True)
+    with pytest.raises(ValidationError, match="too low"):
+        Env(
+            {"PORT": int},
+            sources=[],
+            defaults={"PORT": 1},
+            validators={"PORT": lambda value: "too low"},
+            strict=True,
+        )
+
+
+def test_mutable_defaults_are_isolated_from_input_and_future_reloads() -> None:
+    defaults = {"ITEMS": [{"nested": [1]}]}
+    env = Env({"ITEMS": list}, sources=[], defaults=defaults)
+    defaults["ITEMS"][0]["nested"].append(2)
+    env.ITEMS[0]["nested"].append(3)
+    env.reload()
+
+    assert env.ITEMS == [{"nested": [1]}]
+
+
+def test_empty_source_value_does_not_fall_through_to_default() -> None:
+    env = Env({"PORT": int}, sources=[MemorySource({"PORT": ""})], defaults={"PORT": 8080})
+    assert "PORT" not in env
+    with pytest.raises(MissingKeyError):
+        env.get_source("PORT")
+
+
+def test_provenance_updates_after_reload() -> None:
+    first = MemorySource({"PORT": "8080"}, "first")
+    env = Env({"PORT": int}, sources=[first], defaults={"PORT": 80})
+    first._data.clear()
+    env.reload()
+
+    assert env.PORT == 80
+    assert env.get_source("PORT") == "defaults"
+
+
+def test_redacted_exports_are_opt_in_and_do_not_mutate_values() -> None:
+    env = Env(
+        {"PORT": int, "DB_PASS": str}, sources=[MemorySource({"PORT": "8080", "DB_PASS": "secret"})]
+    )
+
+    assert env.dict(redact=True) == {"PORT": 8080, "DB_PASS": "***"}
+    assert json.loads(env.json(redact=True)) == env.dict(redact=True)
+    assert env.dict()["DB_PASS"] == "secret"
+    assert "secret" not in repr(env)
+
+
+def test_concurrent_refreshes_are_serialized_without_blocking_readers() -> None:
+    entered = threading.Event()
+    second_started = threading.Event()
+    second_entered = threading.Event()
+    release = threading.Event()
+    failures: List[BaseException] = []
+
+    class SlowSource(BaseSource):
+        name = "slow"
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def load(self) -> Dict[str, str]:
+            self.calls += 1
+            number = self.calls
+            if number == 2:
+                entered.set()
+                assert release.wait(10)
+            if number == 3:
+                second_entered.set()
+            return {"NUMBER": str(number), "MATCH": str(number)}
+
+    source = SlowSource()
+    env = Env({"NUMBER": int, "MATCH": int}, sources=[source])
+
+    def reload_env(signal: Optional[threading.Event] = None) -> None:
+        try:
+            if signal is not None:
+                signal.set()
+            env.reload()
+        except BaseException as exc:
+            failures.append(exc)
+
+    first = threading.Thread(target=reload_env)
+    second = threading.Thread(target=reload_env, args=(second_started,))
+    first.start()
+    try:
+        assert entered.wait(5)
+        second.start()
+        assert second_started.wait(5)
+        assert not second_entered.wait(0.1)
+        assert env.dict() == {"NUMBER": 1, "MATCH": 1}
+    finally:
+        release.set()
+        first.join(timeout=5)
+        if second.ident is not None:
+            second.join(timeout=5)
+
+    assert failures == []
+    assert not first.is_alive()
+    assert not second.is_alive()
+    assert env.dict() == {"NUMBER": 3, "MATCH": 3}

@@ -10,7 +10,9 @@ the ImportError paths.
 from __future__ import annotations
 
 import asyncio
+import base64
 import builtins
+import contextvars
 import json
 import sys
 import threading
@@ -105,8 +107,9 @@ class CloudStub(CloudSource):
         values: Dict[str, str],
         cache: bool = True,
         fail_first: int = 0,
+        cache_ttl: Optional[float] = None,
     ) -> None:
-        super().__init__(cache=cache)
+        super().__init__(cache=cache, cache_ttl=cache_ttl)
         self.values = values
         self.fail_first = fail_first
         self.fetches = 0
@@ -295,6 +298,81 @@ def test_cloud_source_aload_propagates_cloud_auth_error() -> None:
 
     with pytest.raises(CloudAuthError):
         asyncio.run(source.aload())
+
+
+@pytest.mark.parametrize("ttl", [0, -1, float("nan"), float("inf"), float("-inf"), True])
+def test_cloud_source_rejects_invalid_ttl(ttl: float) -> None:
+    with pytest.raises(ValueError, match="cache_ttl"):
+        CloudStub({}, cache_ttl=ttl)
+
+
+def test_cloud_source_ttl_starts_after_fetch_and_expires(monkeypatch: pytest.MonkeyPatch) -> None:
+    clock = [10.0]
+    monkeypatch.setattr("smartenv.sources.base.time.monotonic", lambda: clock[0])
+    source = CloudStub({"TOKEN": "first"}, cache_ttl=5)
+    original_fetch = source._fetch
+
+    def slow_fetch() -> Dict[str, str]:
+        clock[0] += 10
+        return original_fetch()
+
+    monkeypatch.setattr(source, "_fetch", slow_fetch)
+    assert source.load() == {"TOKEN": "first"}
+    source.values["TOKEN"] = "rotated"
+    clock[0] = 24.9
+    assert source.load() == {"TOKEN": "first"}
+    clock[0] = 25
+    assert source.load() == {"TOKEN": "rotated"}
+    assert source.fetches == 2
+
+
+def test_cloud_source_failed_refresh_does_not_extend_ttl(monkeypatch: pytest.MonkeyPatch) -> None:
+    clock = [0.0]
+    monkeypatch.setattr("smartenv.sources.base.time.monotonic", lambda: clock[0])
+    source = CloudStub({"TOKEN": "first"}, cache_ttl=1)
+    assert source.load() == {"TOKEN": "first"}
+    source.fail_first = 2
+    clock[0] = 1
+    with pytest.raises(CloudAuthError):
+        source.load()
+    source.values["TOKEN"] = "rotated"
+    assert source.load() == {"TOKEN": "rotated"}
+    assert source.fetches == 3
+
+
+def test_cloud_source_ttl_concurrent_refresh_fetches_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    clock = [0.0]
+    monkeypatch.setattr("smartenv.sources.base.time.monotonic", lambda: clock[0])
+    source = CloudStub({"TOKEN": "first"}, cache_ttl=1)
+    source.load()
+    source.values["TOKEN"] = "rotated"
+    clock[0] = 1
+    barrier = threading.Barrier(5)
+    results: List[Dict[str, str]] = []
+
+    def reader() -> None:
+        barrier.wait(timeout=10)
+        results.append(source.load())
+
+    threads = [threading.Thread(target=reader) for _ in range(5)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=10)
+
+    assert results == [{"TOKEN": "rotated"}] * 5
+    assert source.fetches == 2
+
+
+def test_cloud_source_aload_preserves_contextvars(monkeypatch: pytest.MonkeyPatch) -> None:
+    request_id: contextvars.ContextVar[str] = contextvars.ContextVar("request_id", default="unset")
+    source = CloudStub({}, cache=False)
+    monkeypatch.setattr(source, "_fetch", lambda: {"REQUEST_ID": request_id.get()})
+    token = request_id.set("request-123")
+    try:
+        assert asyncio.run(source.aload()) == {"REQUEST_ID": "request-123"}
+    finally:
+        request_id.reset(token)
 
 
 # --- AwsSource ----------------------------------------------------------------
@@ -525,6 +603,51 @@ def test_aws_source_nested_json_is_flattened(
     assert source.load() == {"DB__HOST": "db.local", "DB__PORT": "5432"}
 
 
+@pytest.mark.parametrize(
+    ("payload", "expected"),
+    [
+        (b'{"PORT": 9000}', {"PORT": "9000"}),
+        (bytearray(b"token"), {"AWS_SECRET": "token"}),
+        (b"dG9rZW4=", {"AWS_SECRET": "dG9rZW4="}),
+        (base64.b64encode(b'{"PORT": 9000}').decode("ascii"), {"PORT": "9000"}),
+    ],
+)
+def test_aws_source_binary_payload(
+    fake_aws: Callable[[], FakeSecretsManagerClient],
+    monkeypatch: pytest.MonkeyPatch,
+    payload: Any,
+    expected: Dict[str, str],
+) -> None:
+    monkeypatch.setattr(fake_aws(), "get_secret_value", lambda **kwargs: {"SecretBinary": payload})
+    assert AwsSource(secret_name="prod/myapp").load() == expected
+
+
+@pytest.mark.parametrize(
+    "response",
+    [{"SecretBinary": b"\xff"}, {"SecretBinary": "not-base64!"}, {}, {"SecretString": None}],
+)
+def test_aws_source_malformed_payload_is_wrapped(
+    fake_aws: Callable[[], FakeSecretsManagerClient],
+    monkeypatch: pytest.MonkeyPatch,
+    response: Dict[str, Any],
+) -> None:
+    monkeypatch.setattr(fake_aws(), "get_secret_value", lambda **kwargs: response)
+    with pytest.raises(CloudAuthError) as error:
+        AwsSource(secret_name="prod/myapp").load()
+    assert error.value.provider == "aws"
+
+
+def test_aws_source_client_creation_error_wrapped(
+    fake_aws: Callable[[], FakeSecretsManagerClient], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def failed_client(*args: Any, **kwargs: Any) -> None:
+        raise RuntimeError("credentials unavailable")
+
+    monkeypatch.setattr(sys.modules["boto3"], "client", failed_client)
+    with pytest.raises(CloudAuthError, match="credentials unavailable"):
+        AwsSource(secret_name="prod/myapp").load()
+
+
 # --- GcpSource ----------------------------------------------------------------
 
 
@@ -695,9 +818,10 @@ def test_gcp_source_fetch_all_secrets(
     fake_gcp().secrets.clear()
     fake_gcp().secrets["alpha"] = '{"A": "1"}'
     fake_gcp().secrets["beta"] = "plain"
+    fake_gcp().secrets["gamma"] = "another plain"
     source = GcpSource(project_id="my-project")
 
-    assert source.load() == {"A": "1", "SECRET": "plain"}
+    assert source.load() == {"A": "1", "BETA": "plain", "GAMMA": "another plain"}
     assert "list_secrets:projects/my-project" in fake_gcp().calls
 
 
@@ -763,6 +887,40 @@ def test_gcp_source_without_sdk_hint(monkeypatch: pytest.MonkeyPatch) -> None:
         source.load()
 
     assert "pip install smartenv[gcp]" in str(excinfo.value)
+
+
+def test_gcp_source_missing_project_fails_before_request(
+    fake_gcp: Callable[[], FakeSecretManagerClient],
+) -> None:
+    with pytest.raises(CloudAuthError, match="GCP_PROJECT_ID"):
+        GcpSource(secret_id="myapp-config").load()
+    assert fake_gcp().calls == []
+
+
+@pytest.mark.parametrize("secret_id", [None, "myapp-config"])
+@pytest.mark.parametrize("data", [b"\xff", None, 123])
+def test_gcp_source_invalid_payload_is_wrapped(
+    fake_gcp: Callable[[], FakeSecretManagerClient],
+    monkeypatch: pytest.MonkeyPatch,
+    secret_id: Optional[str],
+    data: Any,
+) -> None:
+    monkeypatch.setattr(
+        fake_gcp(),
+        "access_secret_version",
+        lambda **kwargs: FakeSecretBundle(payload=FakeSecretBundle(data=data)),
+    )
+    with pytest.raises(CloudAuthError) as error:
+        GcpSource(project_id="my-project", secret_id=secret_id).load()
+    assert error.value.provider == "gcp"
+
+
+def test_gcp_source_listing_error_is_wrapped(
+    fake_gcp: Callable[[], FakeSecretManagerClient],
+) -> None:
+    fake_gcp().error = RuntimeError("list denied")
+    with pytest.raises(CloudAuthError, match="list denied"):
+        GcpSource(project_id="my-project").load()
 
 
 # --- AzureSource --------------------------------------------------------------
@@ -963,6 +1121,63 @@ def test_azure_source_without_sdk_hint(monkeypatch: pytest.MonkeyPatch) -> None:
         source.load()
 
     assert "pip install smartenv[azure]" in str(excinfo.value)
+
+
+def test_azure_source_missing_vault_fails_before_request(
+    fake_azure: Callable[[], FakeKeyVaultClient],
+) -> None:
+    with pytest.raises(CloudAuthError, match="AZURE_VAULT_URL"):
+        AzureSource(secret_names=["api-key"]).load()
+    assert fake_azure().calls == []
+
+
+def test_azure_source_client_creation_error_wrapped(
+    fake_azure: Callable[[], FakeKeyVaultClient], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def failed_credential() -> None:
+        raise RuntimeError("credentials unavailable")
+
+    monkeypatch.setattr(sys.modules["azure.identity"], "DefaultAzureCredential", failed_credential)
+    with pytest.raises(CloudAuthError, match="credentials unavailable"):
+        AzureSource(vault_url="https://vault.example").load()
+
+
+def test_azure_source_pagination_error_is_wrapped(
+    fake_azure: Callable[[], FakeKeyVaultClient], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def failed_pagination() -> Iterator[FakeSecretBundle]:
+        yield FakeSecretBundle(name="api-key")
+        raise RuntimeError("page fetch failed")
+
+    monkeypatch.setattr(fake_azure(), "list_properties_of_secrets", failed_pagination)
+    with pytest.raises(CloudAuthError, match="page fetch failed"):
+        AzureSource(vault_url="https://vault.example").load()
+
+
+def test_provider_ttl_refreshes_are_available(
+    fake_aws: Callable[[], FakeSecretsManagerClient],
+    fake_gcp: Callable[[], FakeSecretManagerClient],
+    fake_azure: Callable[[], FakeKeyVaultClient],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = [0.0]
+    monkeypatch.setattr("smartenv.sources.base.time.monotonic", lambda: clock[0])
+    sources = [
+        AwsSource(secret_name="prod/myapp", cache_ttl=10),
+        GcpSource(project_id="my-project", secret_id="myapp-config", cache_ttl=10),
+        AzureSource(vault_url="https://vault.example", secret_names=["api-key"], cache_ttl=10),
+    ]
+    original = [source.load() for source in sources]
+    fake_aws().secrets["prod/myapp"] = "rotated"
+    fake_gcp().secrets["myapp-config"] = "rotated"
+    fake_azure().secrets["api-key"] = "rotated"
+    assert [source.load() for source in sources] == original
+    clock[0] = 10
+    assert [source.load() for source in sources] == [
+        {"AWS_SECRET": "rotated"},
+        {"SECRET": "rotated"},
+        {"API-KEY": "rotated"},
+    ]
 
 
 # --- resolve_source -----------------------------------------------------------

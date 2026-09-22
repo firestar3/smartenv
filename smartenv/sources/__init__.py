@@ -17,7 +17,9 @@ Example:
 from __future__ import annotations
 
 import importlib
-from typing import Any, Dict, Tuple, Type
+import os
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, Dict, Tuple, Type, Union
 
 from smartenv.sources.base import BaseSource, FileSource, flatten_mapping
 from smartenv.sources.dotenv_source import DotenvSource
@@ -34,12 +36,20 @@ __all__ = [
     "GcpSource",
     "JsonSource",
     "OsSource",
+    "PathSpec",
     "TomlSource",
     "YamlSource",
     "flatten_mapping",
     "parse_secret_payload",
     "resolve_source",
 ]
+
+if TYPE_CHECKING:
+    PathSpec = Union[str, os.PathLike[str]]
+else:
+    # PathLike became subscriptable in Python 3.9. Keep runtime annotation
+    # introspection usable for consumers running Python 3.8 as well.
+    PathSpec = Union[str, os.PathLike]
 
 _CLOUD_SOURCES: Dict[str, Tuple[str, str, str]] = {
     "aws_secrets": ("smartenv.sources.aws_source", "AwsSource", "smartenv[aws]"),
@@ -68,7 +78,7 @@ _LAZY_ATTRIBUTES: Dict[str, str] = {
 """Sources that are imported on first attribute access (PEP 562)."""
 
 
-def resolve_source(source_string: str) -> BaseSource:
+def resolve_source(source_string: PathSpec) -> BaseSource:
     """Build the source described by ``source_string``.
 
     The argument is matched case insensitively and may be:
@@ -77,9 +87,10 @@ def resolve_source(source_string: str) -> BaseSource:
     * ``"aws_secrets"``, ``"gcp_secrets"`` or ``"azure_secrets"`` — a cloud
       secret manager, imported lazily;
     * a path ending in ``.env``, ``.json``, ``.toml``, ``.yaml`` or ``.yml``.
+      Dotenv variants such as ``.env.local`` and ``.env.production`` are accepted.
 
     Args:
-        source_string: Description of the source to build.
+        source_string: Description of the source to build, or a text path object.
 
     Returns:
         A ready to use :class:`BaseSource`.
@@ -92,7 +103,9 @@ def resolve_source(source_string: str) -> BaseSource:
         >>> resolve_source("settings.json")
         <JsonSource name='settings.json'>
     """
-    candidate = source_string.strip()
+    candidate = os.fspath(source_string)
+    if isinstance(source_string, str):
+        candidate = candidate.strip()
     lowered = candidate.lower()
 
     if lowered == "os":
@@ -101,6 +114,9 @@ def resolve_source(source_string: str) -> BaseSource:
     cloud = _CLOUD_SOURCES.get(lowered)
     if cloud is not None:
         return _load_cloud_source(lowered, cloud)
+
+    if Path(candidate).name.lower().startswith(".env."):
+        return DotenvSource(candidate)
 
     for suffixes, module_name, class_name in _FILE_SOURCES:
         if lowered.endswith(suffixes):

@@ -556,6 +556,41 @@ def test_resolve_source_returns_a_json_source(tmp_path: Path) -> None:
     assert isinstance(resolve_source(str(tmp_path / "app.json")), JsonSource)
 
 
+@pytest.mark.parametrize("file_name", [".env", ".env.local", ".env.production", ".ENV.TEST"])
+def test_resolve_source_accepts_path_objects_and_dotenv_variants(
+    tmp_path: Path, file_name: str
+) -> None:
+    path = write_file(tmp_path, file_name, "PORT=8080\n")
+    source = resolve_source(path)
+    assert isinstance(source, DotenvSource)
+    assert source.path == path
+    assert source.load() == {"PORT": "8080"}
+
+
+def test_resolve_source_accepts_custom_pathlike(tmp_path: Path) -> None:
+    path = write_file(tmp_path, ".env.local", "PORT=8080\n")
+
+    class ConfigPath:
+        def __fspath__(self) -> str:
+            return str(path)
+
+    assert resolve_source(ConfigPath()).load() == {"PORT": "8080"}
+
+
+@pytest.mark.parametrize("file_name", ["settings.conf", "env.production", "my.env.backup"])
+def test_resolve_source_does_not_guess_unknown_file_formats(tmp_path: Path, file_name: str) -> None:
+    with pytest.raises(ValueError, match="unknown source"):
+        resolve_source(tmp_path / file_name)
+
+
+def test_file_source_invalid_utf8_is_wrapped(tmp_path: Path) -> None:
+    path = tmp_path / ".env"
+    path.write_bytes(b"TOKEN=\xff")
+    with pytest.raises(SourceLoadError) as error:
+        DotenvSource(path).load()
+    assert isinstance(error.value.__cause__, UnicodeDecodeError)
+
+
 def test_resolve_source_returns_a_toml_source(tmp_path: Path) -> None:
     require_toml()
     from smartenv.sources.toml_source import TomlSource

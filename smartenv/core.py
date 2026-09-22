@@ -43,7 +43,9 @@ Example:
 
 from __future__ import annotations
 
+import copy
 import json
+import os
 import threading
 from types import TracebackType
 from typing import (
@@ -58,37 +60,19 @@ from typing import (
     Tuple,
     Type,
     Union,
-    get_args,
 )
 
-from smartenv.casters import cast
 from smartenv.exceptions import (
-    CastError,
     MissingKeyError,
     MissingSourceError,
     ValidationError,
 )
 from smartenv.schema import normalize_schema
-from smartenv.sources import BaseSource, FileSource, resolve_source
-from smartenv.validators import ValidationResult, Validator, validate
+from smartenv.security import mask_value
+from smartenv.sources import BaseSource, FileSource, PathSpec, resolve_source
+from smartenv.validators import ValidationResult, Validator, _validate_and_cast
 
 __all__ = ["Env"]
-
-_SENSITIVE_MARKERS: Tuple[str, ...] = (
-    "AUTH",
-    "CERT",
-    "CREDENTIAL",
-    "KEY",
-    "PASSWORD",
-    "PASSWD",
-    "PRIVATE",
-    "SECRET",
-    "TOKEN",
-)
-"""Key name fragments that mark a value as sensitive; such values are masked in repr."""
-
-_MASK: str = "***"
-"""Replacement text used for sensitive values."""
 
 
 class Env:
@@ -110,6 +94,8 @@ class Env:
             :func:`smartenv.validators.validate`.
         on_reload: Callback invoked with this instance after a successful
             :meth:`reload`.
+        defaults: Explicit fallback values used when no source defines a key.
+            Defaults use the same casting and validation rules as source values.
 
     Attributes:
         errors: Validation errors from the last load.
@@ -120,28 +106,32 @@ class Env:
     def __init__(
         self,
         schema: Union[Mapping[str, Any], type],
-        sources: Optional[Sequence[Union[str, BaseSource]]] = None,
+        sources: Optional[Sequence[Union[PathSpec, BaseSource]]] = None,
         required: Optional[Sequence[str]] = None,
         strict: bool = False,
         hot_reload: bool = False,
         validators: Optional[Mapping[str, Validator]] = None,
         on_reload: Optional[Callable[[Env], None]] = None,
+        defaults: Optional[Mapping[str, Any]] = None,
     ) -> None:
         self._lock = threading.RLock()
+        self._refresh_lock = threading.RLock()
         self._schema: Dict[str, Any] = normalize_schema(schema)
         self._required: Tuple[str, ...] = tuple(dict.fromkeys(required or ()))
         self._strict = bool(strict)
         self._hot_reload = bool(hot_reload)
         self._custom_validators: Dict[str, Validator] = dict(validators or {})
         self._on_reload = on_reload
+        self._defaults = {key: _copy_value(value) for key, value in (defaults or {}).items()}
         self._values: Dict[str, Any] = {}
+        self._provenance: Dict[str, str] = {}
         self._errors: List[str] = []
         self._warnings: List[str] = []
         self._watcher: Optional[Any] = None
         self._closed = False
 
         if sources is None:
-            specs: Sequence[Union[str, BaseSource]] = ("os",)
+            specs: Sequence[Union[PathSpec, BaseSource]] = ("os",)
         else:
             specs = sources
         self._sources: Tuple[BaseSource, ...] = tuple(self._build_source(spec) for spec in specs)
@@ -258,7 +248,7 @@ class Env:
             raise AttributeError(f"{type(self).__name__!r} object has no attribute {name!r}")
         with self._lock:
             if name in self._values:
-                return self._values[name]
+                return _copy_value(self._values[name])
         raise MissingKeyError(name, message=self._missing_message(name))
 
     def __getitem__(self, key: str) -> Any:
@@ -275,7 +265,7 @@ class Env:
         """
         with self._lock:
             if key in self._values:
-                return self._values[key]
+                return _copy_value(self._values[key])
         raise MissingKeyError(key, message=self._missing_message(key))
 
     def get(self, key: str, default: Any = None) -> Any:
@@ -289,28 +279,55 @@ class Env:
             The cast value, or ``default``.
         """
         with self._lock:
-            return self._values.get(key, default)
+            if key in self._values:
+                return _copy_value(self._values[key])
+            return default
 
-    def dict(self) -> Dict[str, Any]:
-        """Return every resolved value as a plain dictionary.
+    def get_source(self, key: str) -> str:
+        """Return the winning source name for a resolved key.
+
+        Args:
+            key: Key whose origin should be inspected.
 
         Returns:
-            A snapshot copy, in schema order, safe to mutate.
+            The source's ``name``, or ``"defaults"`` for an explicit fallback.
+
+        Raises:
+            MissingKeyError: If the key has no resolved value.
         """
         with self._lock:
-            return dict(self._values)
+            if key in self._provenance:
+                return self._provenance[key]
+        raise MissingKeyError(key, message=self._missing_message(key))
 
-    def json(self, **kwargs: Any) -> str:
+    def dict(self, *, redact: bool = False) -> Dict[str, Any]:
+        """Return every resolved value as a plain dictionary.
+
+        Args:
+            redact: Mask values with sensitive key names when ``True``.
+
+        Returns:
+            A snapshot copy in schema order. Builtin containers are deep copied;
+            custom objects returned by user casters should be treated as immutable.
+        """
+        with self._lock:
+            return {
+                key: _copy_value(mask_value(key, value) if redact else value)
+                for key, value in self._values.items()
+            }
+
+    def json(self, *, redact: bool = False, **kwargs: Any) -> str:
         """Return every resolved value as a JSON document.
 
         Args:
+            redact: Mask values with sensitive key names when ``True``.
             **kwargs: Extra arguments forwarded to :func:`json.dumps`, e.g.
                 ``indent=2``.
 
         Returns:
             The serialized values.
         """
-        return json.dumps(self.dict(), **kwargs)
+        return json.dumps(self.dict(redact=redact), **kwargs)
 
     def __contains__(self, key: object) -> bool:
         """Report whether a key is part of the resolved values.
@@ -356,7 +373,7 @@ class Env:
         """
         with self._lock:
             items = sorted(self._values.items())
-        body = ", ".join(f"{key}={_masked(key, value)!r}" for key, value in items)
+        body = ", ".join(f"{key}={mask_value(key, value)!r}" for key, value in items)
         return f"{type(self).__name__}({body})"
 
     # --- lifecycle -----------------------------------------------------------
@@ -365,8 +382,10 @@ class Env:
         """Re-read every source, re-validate and swap in the new values.
 
         The swap is atomic: concurrent readers see either the previous or the new
-        snapshot. When ``on_reload`` was supplied it is called with this instance
-        afterwards.
+        snapshot. Concurrent refreshes are serialized. A strict validation error
+        or a source loading failure preserves the previous snapshot and report.
+        The rejected report is carried by the exception. When ``on_reload`` was
+        supplied it is called with this instance after the successful swap.
 
         Raises:
             ValidationError: If ``strict`` is enabled and the new values are invalid.
@@ -382,9 +401,10 @@ class Env:
 
         Calling it more than once is harmless; values stay readable afterwards.
         """
-        watcher = self._watcher
-        self._watcher = None
-        self._closed = True
+        with self._lock:
+            watcher = self._watcher
+            self._watcher = None
+            self._closed = True
         stop = getattr(watcher, "stop", None)
         if callable(stop):
             stop()
@@ -396,7 +416,8 @@ class Env:
         Returns:
             ``True`` once the watcher has been stopped.
         """
-        return self._closed
+        with self._lock:
+            return self._closed
 
     @property
     def watcher(self) -> Optional[Any]:
@@ -406,7 +427,8 @@ class Env:
             The watcher object, or ``None`` when hot reload is off, unavailable or
             already closed.
         """
-        return self._watcher
+        with self._lock:
+            return self._watcher
 
     def __enter__(self) -> Env:
         """Enter the runtime context.
@@ -434,7 +456,7 @@ class Env:
     # --- internals -----------------------------------------------------------
 
     @staticmethod
-    def _build_source(spec: Union[str, BaseSource]) -> BaseSource:
+    def _build_source(spec: Union[PathSpec, BaseSource]) -> BaseSource:
         """Resolve a single source specification.
 
         Args:
@@ -449,7 +471,7 @@ class Env:
             ValueError: If ``spec`` is a string that names no known source.
             TypeError: If ``spec`` is neither a string nor source like.
         """
-        if isinstance(spec, str):
+        if isinstance(spec, (str, os.PathLike)):
             return resolve_source(spec)
         candidate: Any = spec
         if callable(getattr(candidate, "load", None)):
@@ -485,31 +507,36 @@ class Env:
             MissingSourceError: If ``strict`` is enabled and a source is missing.
             SourceLoadError: If a source exists but cannot be parsed.
         """
-        raw, warnings = self._collect()
-        result = validate(raw, self._schema, self._required, self._custom_validators or None)
-        warnings.extend(result.warnings)
-        values = self._coerce(raw)
-        with self._lock:
-            self._values = values
-            self._errors = list(result.errors)
-            self._warnings = list(dict.fromkeys(warnings))
-        if self._strict and not result.is_valid:
-            raise ValidationError(errors=result.errors, warnings=result.warnings)
-        return result
+        with self._refresh_lock:
+            raw, warnings, provenance = self._collect()
+            result, values = _validate_and_cast(
+                raw, self._schema, self._required, self._custom_validators or None
+            )
+            warnings = list(dict.fromkeys(warnings + result.warnings))
+            if self._strict and not result.is_valid:
+                raise ValidationError(errors=result.errors, warnings=warnings)
+            values = {key: _copy_value(value) for key, value in values.items()}
+            with self._lock:
+                self._values = values
+                self._provenance = {key: provenance[key] for key in values}
+                self._errors = list(result.errors)
+                self._warnings = warnings
+            return result
 
-    def _collect(self) -> Tuple[Dict[str, str], List[str]]:
+    def _collect(self) -> Tuple[Dict[str, Any], List[str], Dict[str, str]]:
         """Load every source in priority order.
 
         Returns:
-            ``(raw_values, warnings)``. The first source that defines a key wins,
-            so earlier sources have priority over later ones.
+            ``(raw_values, warnings, provenance)``. The first source that defines
+            a key wins. Explicit defaults fill keys absent from every source.
 
         Raises:
             MissingSourceError: If a source is missing and ``strict`` is enabled.
             SourceLoadError: If a source exists but cannot be parsed.
         """
-        raw: Dict[str, str] = {}
+        raw: Dict[str, Any] = {}
         warnings: List[str] = []
+        provenance: Dict[str, str] = {}
         for source in self._sources:
             name = _source_name(source)
             if isinstance(source, FileSource) and not source.exists():
@@ -527,34 +554,13 @@ class Env:
                 continue
             for key, value in loaded.items():
                 if key not in raw:
-                    raw[key] = value
-        return raw, warnings
-
-    def _coerce(self, raw: Mapping[str, str]) -> Dict[str, Any]:
-        """Cast the raw values of the declared keys to their schema types.
-
-        Keys that are unset, or that fail to cast, are omitted: a failure is
-        already reported by :func:`smartenv.validators.validate`. A key declared as
-        ``Optional[X]`` keeps its slot with the value ``None`` when it is empty.
-
-        Args:
-            raw: Raw key/value pairs collected from the sources.
-
-        Returns:
-            The cast values, in schema order.
-        """
-        coerced: Dict[str, Any] = {}
-        for key, type_hint in self._schema.items():
+                    raw[key] = _copy_value(value)
+                    provenance[key] = name
+        for key, value in self._defaults.items():
             if key not in raw:
-                continue
-            value = raw[key]
-            if _is_unset(value) and not _allows_none(type_hint):
-                continue
-            try:
-                coerced[key] = cast(value, type_hint, key=key)
-            except CastError:
-                continue
-        return coerced
+                raw[key] = _copy_value(value)
+                provenance[key] = "defaults"
+        return raw, warnings, provenance
 
     def _start_watcher(self) -> None:
         """Start the file watcher that powers ``hot_reload``.
@@ -581,7 +587,12 @@ class Env:
         except Exception as exc:  # A broken watcher must never break the load.
             self._add_warning(f"hot_reload could not start the watcher: {exc}")
             return
-        self._watcher = watcher
+        with self._lock:
+            closed_during_start = self._closed
+            if not closed_during_start:
+                self._watcher = watcher
+        if closed_during_start:
+            watcher.stop()
 
     def _add_warning(self, message: str) -> None:
         """Append a warning to the report of the current load.
@@ -607,52 +618,15 @@ def _source_name(source: BaseSource) -> str:
     return name if isinstance(name, str) else type(source).__name__
 
 
-def _is_unset(value: Any) -> bool:
-    """Report whether a raw value counts as "not set".
+def _copy_value(value: Any) -> Any:
+    """Isolate builtin containers without reconstructing custom cast objects.
 
     Args:
-        value: Raw value read from a source.
+        value: Configuration value to snapshot.
 
     Returns:
-        ``True`` for ``None`` and for strings that are empty or whitespace only.
+        A deep copy of builtin containers, or the original scalar/custom object.
     """
-    if value is None:
-        return True
-    if isinstance(value, str):
-        return not value.strip()
-    return False
-
-
-def _allows_none(type_hint: Any) -> bool:
-    """Report whether a schema type accepts ``None``.
-
-    Args:
-        type_hint: Type or ``typing`` construct declared in the schema.
-
-    Returns:
-        ``True`` for ``Any``, ``object``, ``NoneType`` and unions containing
-        ``None`` such as ``Optional[int]``.
-    """
-    if type_hint is Any or type_hint is object or type_hint is None:
-        return True
-    if type_hint is type(None):
-        return True
-    return type(None) in get_args(type_hint)
-
-
-def _masked(key: str, value: Any) -> Any:
-    """Mask a value when its key looks sensitive.
-
-    Args:
-        key: Key the value belongs to.
-        value: The value itself.
-
-    Returns:
-        ``"***"`` when the upper cased key contains a sensitive marker, otherwise
-        the value unchanged.
-    """
-    upper = key.upper()
-    for marker in _SENSITIVE_MARKERS:
-        if marker in upper:
-            return _MASK
+    if type(value) in (dict, list, set, frozenset, tuple, bytearray):
+        return copy.deepcopy(value)
     return value

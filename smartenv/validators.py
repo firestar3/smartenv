@@ -16,10 +16,11 @@ Example:
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Union
+from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple, Union, get_args
 
 from smartenv.casters import cast
 from smartenv.exceptions import CastError, ValidationError
+from smartenv.security import is_sensitive_key
 
 __all__ = ["Validator", "ValidationResult", "validate", "validate_or_raise"]
 
@@ -107,13 +108,35 @@ def validate(
         >>> len(validate({"PORT": "abc"}, {"PORT": int}, ["PORT"]).errors)
         1
     """
+    result, _ = _validate_and_cast(env_dict, schema, required, custom_validators)
+    return result
+
+
+def _validate_and_cast(
+    env_dict: Mapping[str, Any],
+    schema: Optional[Mapping[str, Any]] = None,
+    required: Optional[Sequence[str]] = None,
+    custom_validators: Optional[Mapping[str, Validator]] = None,
+) -> Tuple[ValidationResult, Dict[str, Any]]:
+    """Validate and retain the exact values produced by a single casting pass.
+
+    Args:
+        env_dict: Resolved raw values.
+        schema: Declared conversion targets.
+        required: Keys that must be nonempty.
+        custom_validators: Checks receiving the converted values.
+
+    Returns:
+        The validation report and successfully converted schema values.
+    """
     schema_map: Dict[str, Any] = dict(schema or {})
     validator_map: Dict[str, Validator] = dict(custom_validators or {})
     required_keys: List[str] = list(dict.fromkeys(required or []))
 
     errors: List[str] = []
     warnings: List[str] = []
-    absent_keys = [key for key in env_dict if _is_empty(env_dict[key])]
+    values: Dict[str, Any] = {}
+    absent_keys = {key for key in env_dict if _is_empty(env_dict[key])}
 
     for key in required_keys:
         if key not in env_dict:
@@ -124,14 +147,19 @@ def validate(
             warnings.append(f"required key {key!r} has no schema entry; its type cannot be checked")
 
     for key, expected_type in schema_map.items():
-        if key not in env_dict or key in absent_keys:
+        if key not in env_dict:
             continue
         raw_value = env_dict[key]
+        if key in absent_keys:
+            if key not in required_keys and _allows_none(expected_type):
+                values[key] = cast(raw_value, expected_type, key=key)
+            continue
         try:
             coerced = cast(raw_value, expected_type, key=key)
         except CastError as exc:
             errors.append(str(exc))
             continue
+        values[key] = coerced
         validator = validator_map.get(key)
         if validator is not None:
             _run_validator(key, coerced, validator, errors)
@@ -147,7 +175,7 @@ def validate(
     result = ValidationResult(
         is_valid=not errors, errors=errors, warnings=list(dict.fromkeys(warnings))
     )
-    return result
+    return result, values
 
 
 def validate_or_raise(
@@ -197,6 +225,20 @@ def _is_empty(value: Any) -> bool:
     return False
 
 
+def _allows_none(type_hint: Any) -> bool:
+    """Report whether an empty optional value can be retained.
+
+    Args:
+        type_hint: Conversion target declared in a schema.
+
+    Returns:
+        ``True`` for nullable or unconstrained targets.
+    """
+    if type_hint is Any or type_hint is object or type_hint is None:
+        return True
+    return type_hint is type(None) or type(None) in get_args(type_hint)
+
+
 def _run_validator(key: str, value: Any, validator: Validator, errors: List[str]) -> None:
     """Run a custom validator and append an error when it fails.
 
@@ -214,10 +256,14 @@ def _run_validator(key: str, value: Any, validator: Validator, errors: List[str]
     try:
         outcome = validator(value)
     except Exception as exc:  # User validators may raise anything; report, never abort.
-        errors.append(f"validator for {key!r} raised {type(exc).__name__}: {exc}")
+        detail = " (details redacted)" if is_sensitive_key(key) else f": {exc}"
+        errors.append(f"validator for {key!r} raised {type(exc).__name__}{detail}")
         return
 
     if outcome is True or outcome is None:
+        return
+    if is_sensitive_key(key):
+        errors.append(f"validator for {key!r} failed (details redacted)")
         return
     if isinstance(outcome, str):
         errors.append(outcome if outcome else f"validator for {key!r} failed")

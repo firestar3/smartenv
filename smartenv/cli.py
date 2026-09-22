@@ -8,27 +8,24 @@ with the same semantics as :class:`smartenv.Env`.
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 import types
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple, Union, get_args, get_origin
 
+from smartenv._version import __version__
+from smartenv.schema import normalize_schema
+from smartenv.security import mask_value
 from smartenv.sources import resolve_source
 from smartenv.validators import Validator, validate
 
 __all__ = ["main"]
 
-_SENSITIVE_MARKERS: Tuple[str, ...] = (
-    "SECRET",
-    "KEY",
-    "TOKEN",
-    "PASSWORD",
-    "PASS",
-    "CREDENTIAL",
-)
 
-
-def _read_schema(path_string: str) -> Tuple[Dict[str, Any], List[str], Dict[str, Validator]]:
+def _read_schema(
+    path_string: str,
+) -> Tuple[Dict[str, Any], List[str], Dict[str, Validator], Dict[str, Any]]:
     """Execute a UTF-8 schema file and check its public configuration values."""
     path = Path(path_string).resolve()
     namespace: Dict[str, Any] = {"__file__": str(path), "__name__": "smartenv_schema"}
@@ -36,6 +33,7 @@ def _read_schema(path_string: str) -> Tuple[Dict[str, Any], List[str], Dict[str,
     schema = namespace.get("schema")
     if not isinstance(schema, dict) or any(not isinstance(key, str) for key in schema):
         raise ValueError("schema file must define a 'schema' dictionary with string keys")
+    schema = normalize_schema(schema)
 
     required = namespace.get("required", [])
     if (
@@ -50,7 +48,10 @@ def _read_schema(path_string: str) -> Tuple[Dict[str, Any], List[str], Dict[str,
         not isinstance(key, str) or not callable(value) for key, value in validators.items()
     ):
         raise ValueError("schema file 'validators' must map key names to callables")
-    return dict(schema), list(required), dict(validators)
+    defaults = namespace.get("defaults", {})
+    if not isinstance(defaults, Mapping) or any(key not in schema for key in defaults):
+        raise ValueError("schema file 'defaults' must map declared schema keys to values")
+    return dict(schema), list(required), dict(validators), dict(defaults)
 
 
 def _load_sources(sources: Sequence[str]) -> Dict[str, str]:
@@ -83,9 +84,17 @@ def _type_label(type_hint: Any) -> str:
 
 def _validate_command(args: argparse.Namespace) -> int:
     """Report every validation error and return a shell-compatible status."""
-    schema, required, validators = _read_schema(args.schema)
-    values = _load_sources(args.sources)
+    schema, required, validators, defaults = _read_schema(args.schema)
+    values = dict(defaults)
+    values.update(_load_sources(args.sources))
     result = validate(values, schema, required, validators)
+    if args.format == "json":
+        print(
+            json.dumps(
+                {"valid": result.is_valid, "errors": result.errors, "warnings": result.warnings}
+            )
+        )
+        return 0 if result.is_valid else 1
     for warning in result.warnings:
         print(f"Warning: {warning}")
     if result.is_valid:
@@ -98,12 +107,18 @@ def _validate_command(args: argparse.Namespace) -> int:
 
 def _generate_example_command(args: argparse.Namespace) -> int:
     """Write an empty, annotated entry for every schema key."""
-    schema, required, _ = _read_schema(args.schema)
+    schema, required, _, _ = _read_schema(args.schema)
     lines: List[str] = []
     for key, type_hint in schema.items():
         status = "REQUIRED" if key in required else "optional"
         lines.extend((f"# {key} ({_type_label(type_hint)}) [{status}]", f"{key}="))
-    Path(args.output).write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
+    try:
+        with Path(args.output).open("w" if args.force else "x", encoding="utf-8") as output:
+            output.write("\n".join(lines) + ("\n" if lines else ""))
+    except FileExistsError as exc:
+        raise ValueError(
+            f"output {args.output!r} already exists; use --force to replace it"
+        ) from exc
     print(f"\u2713 Wrote {args.output}")
     return 0
 
@@ -111,9 +126,11 @@ def _generate_example_command(args: argparse.Namespace) -> int:
 def _list_command(args: argparse.Namespace) -> int:
     """Print merged configuration, masking sensitive key names."""
     values = _load_sources(args.sources)
-    for key in sorted(values):
-        sensitive = any(marker in key.upper() for marker in _SENSITIVE_MARKERS)
-        value = "*****" if sensitive else values[key]
+    masked = {key: mask_value(key, values[key], mask="*****") for key in sorted(values)}
+    if args.format == "json":
+        print(json.dumps(masked))
+        return 0
+    for key, value in masked.items():
         print(f"{key}={value}")
     return 0
 
@@ -130,12 +147,14 @@ def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="smartenv", description="Manage application configuration."
     )
+    parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     commands = parser.add_subparsers(dest="command", required=True)
 
     validate_parser = commands.add_parser(
         "validate", help="Validate sources against a Python schema."
     )
     validate_parser.add_argument("--schema", required=True, help="Python file defining schema.")
+    validate_parser.add_argument("--format", choices=("text", "json"), default="text")
     validate_parser.add_argument(
         "--sources", nargs="+", default=["os"], help="Sources in priority order."
     )
@@ -146,9 +165,13 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     example_parser.add_argument("--schema", required=True, help="Python file defining schema.")
     example_parser.add_argument("--output", default=".env.example", help="Output path.")
+    example_parser.add_argument(
+        "--force", action="store_true", help="Replace an existing output file."
+    )
     example_parser.set_defaults(handler=_generate_example_command)
 
     list_parser = commands.add_parser("list", help="List values with sensitive keys masked.")
+    list_parser.add_argument("--format", choices=("text", "json"), default="text")
     list_parser.add_argument(
         "--sources", nargs="+", default=["os"], help="Sources in priority order."
     )
@@ -185,7 +208,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     try:
         result: int = args.handler(args)
     except Exception as exc:
-        print(f"\u2717 Failed: {exc}")
+        if getattr(args, "format", "text") == "json":
+            print(json.dumps({"valid": False, "errors": [str(exc)], "warnings": []}))
+        else:
+            print(f"\u2717 Failed: {exc}")
         return 1
     return result
 

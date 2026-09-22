@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import sys
@@ -9,6 +10,7 @@ from pathlib import Path
 
 import pytest
 
+from smartenv import __version__
 from smartenv.cli import main
 
 
@@ -27,6 +29,109 @@ def test_validate_success(tmp_path: Path, capsys: pytest.CaptureFixture[str]) ->
 
     assert main(["validate", "--schema", str(schema), "--sources", str(source)]) == 0
     assert capsys.readouterr().out == "\u2713 Validation passed\n"
+
+
+def test_cli_version(capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.raises(SystemExit) as outcome:
+        main(["--version"])
+    assert outcome.value.code == 0
+    assert capsys.readouterr().out == f"smartenv {__version__}\n"
+
+
+def test_package_module_entry_point() -> None:
+    result = subprocess.run(
+        [sys.executable, "-m", "smartenv", "--version"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0
+    assert result.stdout.strip() == f"smartenv {__version__}"
+
+
+def test_validate_json_redacts_sensitive_failures(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    schema = write_file(
+        tmp_path, "schema.py", "schema = {'API_KEY': int, 'PORT': int}\nrequired = ['PORT']\n"
+    )
+    source = write_file(tmp_path, ".env", "API_KEY=secret-credential\n")
+    assert (
+        main(["validate", "--schema", str(schema), "--sources", str(source), "--format", "json"])
+        == 1
+    )
+    output = capsys.readouterr().out
+    report = json.loads(output)
+    assert report["valid"] is False
+    assert len(report["errors"]) == 2
+    assert "secret-credential" not in output
+
+
+def test_validate_json_reports_source_errors(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    schema = write_file(tmp_path, "schema.py", "schema = {'PORT': int}\n")
+    assert (
+        main(
+            [
+                "validate",
+                "--schema",
+                str(schema),
+                "--sources",
+                str(tmp_path / "missing.env"),
+                "--format",
+                "json",
+            ]
+        )
+        == 1
+    )
+    assert json.loads(capsys.readouterr().out)["valid"] is False
+
+
+def test_validate_schema_defaults(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    schema = write_file(
+        tmp_path,
+        "schema.py",
+        "schema = {'PORT': int}\nrequired = ['PORT']\ndefaults = {'PORT': '8080'}\n",
+    )
+    source = write_file(tmp_path, ".env", "")
+    assert (
+        main(["validate", "--schema", str(schema), "--sources", str(source), "--format", "json"])
+        == 0
+    )
+    assert json.loads(capsys.readouterr().out) == {"valid": True, "errors": [], "warnings": []}
+    source.write_text("PORT=invalid\n", encoding="utf-8")
+    assert main(["validate", "--schema", str(schema), "--sources", str(source)]) == 1
+
+
+def test_list_json_masks_shared_sensitive_markers(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    source = write_file(
+        tmp_path,
+        ".env",
+        "AUTH_HEADER=credential\nPRIVATE_DATA=credential\nCERT_DATA=credential\nPORT=8000\n",
+    )
+    assert main(["list", "--sources", str(source), "--format", "json"]) == 0
+    assert json.loads(capsys.readouterr().out) == {
+        "AUTH_HEADER": "*****",
+        "PRIVATE_DATA": "*****",
+        "CERT_DATA": "*****",
+        "PORT": "8000",
+    }
+
+
+def test_generate_example_requires_force_to_replace(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    schema = write_file(tmp_path, "schema.py", "schema = {'PORT': int}\n")
+    output = write_file(tmp_path, ".env.example", "existing content\n")
+    args = ["generate-example", "--schema", str(schema), "--output", str(output)]
+    assert main(args) == 1
+    assert "--force" in capsys.readouterr().out
+    assert output.read_text(encoding="utf-8") == "existing content\n"
+    assert main(args + ["--force"]) == 0
+    assert output.read_text(encoding="utf-8") == "# PORT (int) [optional]\nPORT=\n"
 
 
 def test_validate_reports_all_errors(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:

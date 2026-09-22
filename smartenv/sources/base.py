@@ -17,8 +17,11 @@ Example:
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import json
+import math
 import threading
+import time
 from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Any, Dict, Mapping, Optional, Union
@@ -78,8 +81,7 @@ class CloudSource(BaseSource):
     This class adds the features shared by every cloud source:
 
     * a thread safe, per instance result :attr:`cache` (opt out with
-      ``cache=False``), so repeated :meth:`load` calls only hit the network
-      once;
+      ``cache=False``), with optional expiration via ``cache_ttl``;
     * :meth:`aload`, an ``await``-able variant of :meth:`load` that runs the
       (synchronous) SDK calls on a worker thread and therefore also works on
       Python 3.8;
@@ -89,17 +91,29 @@ class CloudSource(BaseSource):
     backing store, so that a source can be loaded from several threads.
 
     Args:
-        cache: When ``True``, the first successful :meth:`load` result is
-            cached and returned by every later call.
+        cache: When ``True``, successful :meth:`load` results are cached.
+        cache_ttl: Positive finite cache lifetime in seconds. ``None`` caches
+            indefinitely. Expired values refresh on the next :meth:`load`;
+            no background polling occurs. Ignored when ``cache=False``.
 
     Attributes:
         cache: Whether successful fetches are cached.
+        cache_ttl: Cache lifetime in seconds, or ``None`` for no expiration.
     """
 
-    def __init__(self, cache: bool = True) -> None:
+    def __init__(self, cache: bool = True, cache_ttl: Optional[float] = None) -> None:
+        if cache_ttl is not None and (
+            isinstance(cache_ttl, bool)
+            or not isinstance(cache_ttl, (int, float))
+            or not math.isfinite(cache_ttl)
+            or cache_ttl <= 0
+        ):
+            raise ValueError("cache_ttl must be a positive finite number of seconds or None")
         self.cache = cache
+        self.cache_ttl = cache_ttl
         self._cache_lock = threading.Lock()
         self._cached: Optional[Dict[str, str]] = None
+        self._cached_at: Optional[float] = None
 
     @abstractmethod
     def _fetch(self) -> Dict[str, str]:
@@ -119,7 +133,8 @@ class CloudSource(BaseSource):
         """Return the key/value pairs provided by the cloud provider.
 
         The result is served from the cache when caching is enabled and a
-        previous call succeeded.
+        previous call succeeded and its lifetime has not expired. Failed
+        refreshes raise without extending the lifetime or serving stale data.
 
         Returns:
             A new dictionary of key to string value; mutating it never affects
@@ -131,8 +146,14 @@ class CloudSource(BaseSource):
         with self._cache_lock:
             if not self.cache:
                 return dict(self._fetch())
-            if self._cached is None:
+            expired = (
+                self.cache_ttl is not None
+                and self._cached_at is not None
+                and time.monotonic() - self._cached_at >= self.cache_ttl
+            )
+            if self._cached is None or expired:
                 self._cached = dict(self._fetch())
+                self._cached_at = time.monotonic()
             return dict(self._cached)
 
     async def aload(self) -> Dict[str, str]:
@@ -145,12 +166,14 @@ class CloudSource(BaseSource):
             CloudAuthError: If the provider cannot be reached or authenticated.
         """
         loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(None, self.load)
+        context = contextvars.copy_context()
+        return await loop.run_in_executor(None, context.run, self.load)
 
     def cache_clear(self) -> None:
         """Drop the cached result so the next :meth:`load` fetches again."""
         with self._cache_lock:
             self._cached = None
+            self._cached_at = None
 
 
 def parse_secret_payload(raw: str, default_key: str = "SECRET") -> Dict[str, str]:
@@ -245,7 +268,7 @@ class FileSource(BaseSource):
             raise MissingSourceError(str(self._path))
         try:
             text = self._path.read_text(encoding="utf-8")
-        except OSError as exc:
+        except (OSError, UnicodeError) as exc:
             raise SourceLoadError(str(self._path), reason=str(exc)) from exc
         if text.startswith("\ufeff"):
             return text[1:]

@@ -9,7 +9,8 @@ no ``secret_id`` is given) from Google Secret Manager::
     values = source.load()          # {"PORT": "8080", "HOST": "db.example"}
 
 A secret payload may be a JSON object — flattened with the same rules as the
-JSON source — or any plain string, served under the ``SECRET`` key. The module
+JSON source — or any plain string, served under the ``SECRET`` key for a
+selected secret, or its uppercased secret ID when fetching all secrets. The module
 imports :mod:`google.cloud.secretmanager` lazily, so a plain
 ``import smartenv.sources`` never pulls it in.
 """
@@ -37,6 +38,8 @@ class GcpSource(CloudSource):
             the additional ``secretmanager.secrets.list`` permission).
         version: Version of the secret to read, ``"latest"`` by default.
         cache: When ``True``, the first successful fetch is cached and reused.
+        cache_ttl: Positive finite cache lifetime in seconds, or ``None`` for
+            indefinite caching. Expiration is checked when loading.
 
     Attributes:
         project_id: Resolved project identifier, or ``""`` when unset.
@@ -50,8 +53,9 @@ class GcpSource(CloudSource):
         secret_id: Optional[str] = None,
         version: str = "latest",
         cache: bool = True,
+        cache_ttl: Optional[float] = None,
     ) -> None:
-        super().__init__(cache=cache)
+        super().__init__(cache=cache, cache_ttl=cache_ttl)
         self.project_id = project_id or os.environ.get("GCP_PROJECT_ID", "")
         self.secret_id = secret_id or os.environ.get("GCP_SECRET_ID", "")
         self.version = version
@@ -88,6 +92,12 @@ class GcpSource(CloudSource):
                     "pip install smartenv[gcp]"
                 ),
             ) from exc
+        if not self.project_id.strip():
+            raise CloudAuthError(
+                "gcp", message="provide project_id or set the GCP_PROJECT_ID environment variable"
+            )
+        if not self.version.strip():
+            raise CloudAuthError("gcp", message="provide a non-empty secret version")
         try:
             if self._client is None:
                 self._client = secretmanager.SecretManagerServiceClient()
@@ -127,7 +137,7 @@ class GcpSource(CloudSource):
 
         Returns:
             A mapping merging the parsed payloads of each secret. Plain
-            payloads share the ``SECRET`` key, so later payloads replace it.
+            payloads use their uppercased secret ID as the key.
 
         Raises:
             CloudAuthError: If listing or accessing a secret fails.
@@ -146,7 +156,9 @@ class GcpSource(CloudSource):
                 response = client.access_secret_version(request=request)
             except Exception as exc:
                 raise CloudAuthError("gcp", reason=str(exc)) from exc
-            values.update(parse_secret_payload(_payload_text(response)))
+            values.update(
+                parse_secret_payload(_payload_text(response), default_key=secret_name.upper())
+            )
         return values
 
 
@@ -157,20 +169,22 @@ def _payload_text(response: Any) -> str:
         response: Response object from the Google SDK.
 
     Returns:
-        The UTF-8 decoded payload, or ``""`` when it is absent.
+        The UTF-8 decoded payload.
+
+    Raises:
+        ValueError: If the payload is absent or not text or bytes.
+        UnicodeDecodeError: If binary data is not valid UTF-8.
     """
     payload = getattr(response, "payload", None)
     if payload is None and isinstance(response, dict):
         payload = response.get("payload")
     if payload is None:
-        return ""
+        raise ValueError("response is missing a secret payload")
     data = getattr(payload, "data", None)
-    if data is None:
-        return ""
+    if data is None and isinstance(payload, dict):
+        data = payload.get("data")
     if isinstance(data, str):
         return data
-    try:
-        decoded: str = data.decode("utf-8")
-    except (AttributeError, UnicodeDecodeError):
-        return str(data)
-    return decoded
+    if isinstance(data, (bytes, bytearray)):
+        return data.decode("utf-8")
+    raise ValueError("secret payload data must contain text or bytes")

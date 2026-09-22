@@ -1,5 +1,30 @@
 # SMARTENV Build Tracker
 
+## Current release: 1.0.0 — IMPLEMENTATION COMPLETE (2026-09-21)
+
+This release section supersedes the historical behavior and tooling notes below.
+The release is built and verified locally; GitHub push/tag and PyPI publication are
+maintainer steps documented in docs/RELEASING.md, and have not been performed.
+
+- [x] Core reliability — serialize refreshes, atomically commit valid snapshots, preserve last-good state on rejected strict reloads, cast once, isolate builtin mutable values, and follow Python missing-key conventions.
+- [x] Configuration ergonomics — typed defaults, source provenance via get_source(), optional redacted dict/JSON exports, PathLike sources and named dotenv files.
+- [x] Sensitive diagnostics — shared key-name masking for representations, CLI listings and cast/validator display errors; document raw exception and heuristic limitations.
+- [x] Cloud reliability — monotonic cache TTLs, serialized refreshes, explicit expired-cache failures, context-preserving async loads on Python 3.8, AWS binary secrets, GCP fetch-all key preservation, and clearer configuration/payload failures.
+- [x] Hot reload — trailing debounce, serialized reload worker, atomic-save events, changes queued during active reloads, startup cleanup, cancellation and safe callback shutdown.
+- [x] CLI — Python 3.8 type-label correction, module entry point, version output, JSON validation/listing, schema defaults and overwrite protection with --force.
+- [x] Packaging — single 1.0.0 version source, zero mandatory runtime dependencies, PEP 561 marker, metadata/license checks, tag/version agreement and fresh-environment wheel checks.
+- [x] CI — Python 3.8–3.14 on Linux, Windows/macOS on Python 3.12, formatting/lint/strict typing, doctests, a 90% coverage floor, distribution checks and wheel installation.
+- [x] Publishing — full CI before upload, verified artifact reuse, commit-pinned actions, Dependabot and PyPI Trusted Publishing through the pypi environment with job-scoped OIDC permissions.
+- [x] Documentation — 1.0 README/changelog plus contributor, security, migration and step-by-step GitHub/PyPI release guides.
+- [x] Python 3.12.14 and 3.14.7 full suites — 447 passed on each; 93.03% combined statement/branch coverage.
+- [x] Python 3.8.10 full suite — 446 passed, 1 skipped (Python 3.10 union syntax only); 93.61% coverage. Optional watchdog and Pydantic tests were exercised.
+- [x] Doctests — 18 passed. Ruff, Black and strict mypy passed for all 31 package/test/release-script files. Final import succeeds.
+- [x] Distribution verification — built wheel and sdist in dist/1.0.0; strict Twine and archive/version checks passed. Installed wheel into a fresh environment without extras and verified typed defaults, provenance, module/console entry points and OS source loading.
+
+Cloud tests use SDK doubles; real provider credentials were not exercised. Local runs
+used Windows. The expanded hosted Linux/macOS matrix will run after the commit is pushed.
+No implementation tasks remain for the prepared 1.0.0 release.
+
 ## Phase 1: Foundation — COMPLETE (moved to DONE)
 
 ## Phase 2: Sources — COMPLETE (moved to DONE)

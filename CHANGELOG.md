@@ -1,5 +1,44 @@
 # Changelog
 
+## [1.0.0] - 2026-09-21
+
+### Added
+
+- Explicit `Env(defaults=...)` fallbacks, validated with the schema after all sources.
+- `Env.get_source(key)` to identify the source of a resolved value.
+- `Env.dict(redact=True)` and `Env.json(redact=True)` for masked inspection.
+- Optional positive `cache_ttl` on AWS, GCP, Azure, and custom cloud sources; expiration is checked on load.
+- AWS UTF-8 binary secret support and validation of malformed provider responses.
+- `pathlib.Path` source specifications and direct recognition of `.env.local`, `.env.production`, and other named dotenv variants.
+- `python -m smartenv`, `--version`, JSON output for CLI `validate` and `list`, and `generate-example --force`.
+- Migration, contributor, security, and PyPI release guides.
+- A single version definition shared by runtime and distribution metadata.
+- CI for Python 3.8–3.14 on Linux and Python 3.12 on Windows and macOS; formatting, strict typing, doctests, a 90% coverage minimum, distribution validation, and isolated installation checks.
+- Tag-triggered PyPI Trusted Publishing after the complete CI suite, using verified wheel/source artifacts and publication attestations.
+- Commit-pinned GitHub Actions and Dependabot configuration for workflow maintenance.
+
+### Fixed
+
+- Strict failed reloads and source loading failures preserve the last successful configuration and validation report.
+- Refreshes are serialized; casting is performed once per schema value, so custom casters are not invoked twice.
+- Copies of builtin mutable values isolate readers, defaults, and source state.
+- Sensitive key names are consistently masked in debug representations, CLI listings, and cast/validator display errors.
+- File observation uses a trailing 0.5-second quiet period, handles atomic saves, queues edits received during a reload, and cancels pending work on shutdown.
+- Watcher startup failures clean up threads; callbacks may close their own environment safely.
+- GCP fetch-all retains individual plaintext secrets under their uppercased secret IDs.
+- Cloud refresh failures do not extend expired caches or silently return stale data; async loading preserves context variables on Python 3.8+.
+- Existing example files are protected from accidental overwrite.
+
+### Compatibility notes
+
+- `MissingKeyError` now also inherits from `AttributeError` and `KeyError`; missing attributes work with `hasattr` and `getattr` defaults.
+- Failed strict reload reports are carried by the exception, rather than replacing `env.errors` and the active snapshot.
+- In-place edits to containers returned by `Env` no longer mutate its internal configuration.
+- Sensitive diagnostic text and GCP fetch-all plaintext keys intentionally differ from 0.1.
+- Example generation requires `--force` when the destination already exists.
+- Publishing uses a configured PyPI Trusted Publisher and GitHub `pypi` environment instead of a `PYPI_TOKEN` secret.
+- See [the migration guide](docs/MIGRATING.md) before updating existing applications.
+
 ## [0.1.0] - 2026-09-21
 
 ### Added

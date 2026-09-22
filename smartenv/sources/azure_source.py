@@ -38,6 +38,8 @@ class AzureSource(CloudSource):
             every secret of the vault is listed and fetched, which requires the
             additional ``get``/``list`` permissions.
         cache: When ``True``, the first successful fetch is cached and reused.
+        cache_ttl: Positive finite cache lifetime in seconds, or ``None`` for
+            indefinite caching. Expiration is checked when loading.
 
     Attributes:
         vault_url: Resolved vault URL, or ``""`` when unset.
@@ -49,8 +51,9 @@ class AzureSource(CloudSource):
         vault_url: Optional[str] = None,
         secret_names: Optional[List[str]] = None,
         cache: bool = True,
+        cache_ttl: Optional[float] = None,
     ) -> None:
-        super().__init__(cache=cache)
+        super().__init__(cache=cache, cache_ttl=cache_ttl)
         self.vault_url = vault_url or os.environ.get("AZURE_VAULT_URL", "")
         self.secret_names = list(secret_names) if secret_names is not None else None
         self._client: Any = None
@@ -85,25 +88,30 @@ class AzureSource(CloudSource):
                     "them with: pip install smartenv[azure]"
                 ),
             ) from exc
+        if not self.vault_url.strip():
+            raise CloudAuthError(
+                "azure", message="provide vault_url or set the AZURE_VAULT_URL environment variable"
+            )
         try:
             if self._client is None:
                 self._client = SecretClient(
                     vault_url=self.vault_url, credential=DefaultAzureCredential()
                 )
-        except Exception as exc:
-            raise CloudAuthError("azure", reason=str(exc)) from exc
-        try:
             names = (
                 self._list_secret_names(self._client)
                 if self.secret_names is None
                 else self.secret_names
             )
+            values: Dict[str, str] = {}
+            for secret_name in names:
+                if not secret_name.strip():
+                    raise ValueError("secret names must be non-empty")
+                values.update(self._fetch_one(self._client, secret_name))
+            return values
+        except CloudAuthError:
+            raise
         except Exception as exc:
             raise CloudAuthError("azure", reason=str(exc)) from exc
-        values: Dict[str, str] = {}
-        for secret_name in names:
-            values.update(self._fetch_one(self._client, secret_name))
-        return values
 
     def _fetch_one(self, client: Any, secret_name: str) -> Dict[str, str]:
         """Fetch a single secret by name.

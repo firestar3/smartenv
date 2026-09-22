@@ -6,7 +6,7 @@ import os
 import threading
 from pathlib import Path
 from time import monotonic
-from typing import TYPE_CHECKING, Any, Callable, Dict, Optional, Sequence
+from typing import TYPE_CHECKING, Any, Callable, Optional, Sequence
 
 if TYPE_CHECKING:
     from smartenv.core import Env
@@ -23,9 +23,10 @@ class FileWatcher:
         on_reload: Additional callback after a successful reload. Env's own
             callback is already invoked by its reload method.
 
-    Events for the same file within 0.5 seconds are ignored. Reload or callback
-    failures are recorded in ``env_instance.warnings`` and do not kill the
-    observer, allowing a subsequent edit to recover.
+    Reloads run after 0.5 seconds without a matching event, so a burst of writes
+    reads the completed save. A single daemon worker serializes reloads and
+    callbacks. Reload or callback failures are recorded in
+    ``env_instance.warnings``, allowing a subsequent edit to recover.
     """
 
     def __init__(
@@ -37,60 +38,123 @@ class FileWatcher:
         self._env = env_instance
         self._paths = frozenset(_normalize_path(path) for path in file_paths)
         self._on_reload = on_reload
-        self._lock = threading.RLock()
-        self._last_events: Dict[str, float] = {}
+        self._condition = threading.Condition()
+        self._deadline: Optional[float] = None
+        self._active = False
         self._observer: Optional[Any] = None
+        self._worker: Optional[threading.Thread] = None
 
     def start(self) -> None:
-        """Start a daemon observer, or do nothing when already started.
+        """Start daemon observation and reload threads.
+
+        Repeated calls while running, and calls with no file paths, do nothing.
 
         Raises:
             ImportError: If watchdog is unavailable, with an installation hint.
             OSError: If a parent directory cannot be watched.
+            RuntimeError: If a previous reload is still shutting down.
         """
-        with self._lock:
-            if self._observer is not None:
-                return
-            try:
-                from watchdog.events import FileSystemEventHandler
-                from watchdog.observers import Observer
-            except ImportError as exc:
-                raise ImportError(
-                    "hot reload requires watchdog; install it with: pip install smartenv[watch]"
-                ) from exc
+        observer: Optional[Any] = None
+        worker: Optional[threading.Thread] = None
+        try:
+            with self._condition:
+                if self._active or not self._paths:
+                    return
+                if (
+                    self._worker is not None
+                    and self._worker.is_alive()
+                    or self._observer is not None
+                    and self._observer.is_alive()
+                ):
+                    raise RuntimeError("the previous file watcher is still stopping")
+                try:
+                    from watchdog.events import FileSystemEventHandler
+                    from watchdog.observers import Observer
+                except ImportError as exc:
+                    raise ImportError(
+                        "hot reload requires watchdog; install it with: pip install smartenv[watch]"
+                    ) from exc
 
-            observer = Observer()
-            observer.daemon = True
-            handler = FileSystemEventHandler()
-            # Creation and moves cover editors that save by replacing the file.
-            for event_name in ("on_modified", "on_created", "on_moved", "on_deleted"):
-                setattr(handler, event_name, self._handle_event)
-            for directory in sorted({str(Path(path).parent) for path in self._paths}):
-                observer.schedule(handler, directory, recursive=False)
-            self._last_events.clear()
-            self._observer = observer
-            try:
+                observer = Observer()
+                observer.daemon = True
+                handler = FileSystemEventHandler()
+                # Creation and moves cover editors that replace the saved file.
+                for event_name in ("on_modified", "on_created", "on_moved", "on_deleted"):
+                    setattr(handler, event_name, self._handle_event)
+                for directory in sorted({str(Path(path).parent) for path in self._paths}):
+                    observer.schedule(handler, directory, recursive=False)
+                worker = threading.Thread(target=self._run, name="smartenv-reload", daemon=True)
+                self._deadline = None
+                self._observer = observer
+                self._worker = worker
+                self._active = True
                 observer.start()
-            except Exception:
-                self._observer = None
+                worker.start()
+        except Exception:
+            # Join outside the condition: an already-started observer may be
+            # delivering an event which needs that same lock.
+            if observer is not None:
+                with self._condition:
+                    self._active = False
+                    self._deadline = None
+                    self._condition.notify_all()
+                observer_alive = observer.is_alive()
                 observer.stop()
-                if observer.is_alive():
+                if observer_alive:
                     observer.join()
-                raise
+                if worker is not None and worker.is_alive():
+                    worker.join()
+                with self._condition:
+                    self._observer = None
+                    self._worker = None
+            raise
 
     def stop(self) -> None:
-        """Stop the observer and wait for it, safely allowing repeated calls."""
-        with self._lock:
+        """Cancel pending reloads and wait for observation and reloads to finish.
+
+        Repeated calls are safe. When called inside a reload callback, the worker
+        finishes that callback and exits without trying to join itself.
+        """
+        with self._condition:
+            self._active = False
+            self._deadline = None
             observer = self._observer
-            self._observer = None
+            worker = self._worker
+            self._condition.notify_all()
         if observer is not None:
             observer.stop()
-            # A reload callback may close its own Env on the observer thread.
             if observer is not threading.current_thread():
                 observer.join()
+        if worker is not None and worker is not threading.current_thread():
+            worker.join()
+
+    def _run(self) -> None:
+        """Consume the most recent deadline, then reload outside the state lock."""
+        while True:
+            with self._condition:
+                while self._active:
+                    if self._deadline is None:
+                        self._condition.wait()
+                        continue
+                    remaining = self._deadline - monotonic()
+                    if remaining > 0:
+                        self._condition.wait(timeout=remaining)
+                        continue
+                    self._deadline = None
+                    break
+                if not self._active:
+                    return
+            try:
+                self._env.reload()
+                with self._condition:
+                    active = self._active
+                if active and self._on_reload is not None:
+                    self._on_reload(self._env)
+            except Exception as exc:
+                self._env._add_warning(f"hot_reload failed: {exc}")
 
     def _handle_event(self, event: Any) -> None:
-        """Reload for matching file events, suppressing duplicate notifications."""
+        """Extend the quiet period for each matching file event."""
         if event.is_directory:
             return
         event_paths = {
@@ -98,28 +162,13 @@ class FileWatcher:
             for path in (event.src_path, getattr(event, "dest_path", ""))
             if path
         }
-        matched = event_paths.intersection(self._paths)
-        if not matched:
+        if not event_paths.intersection(self._paths):
             return
-        with self._lock:
-            if self._observer is None:
+        with self._condition:
+            if not self._active:
                 return
-            now = monotonic()
-            changed = {
-                path
-                for path in matched
-                if path not in self._last_events or now - self._last_events[path] >= 0.5
-            }
-            if not changed:
-                return
-            for path in changed:
-                self._last_events[path] = now
-        try:
-            self._env.reload()
-            if self._on_reload is not None:
-                self._on_reload(self._env)
-        except Exception as exc:
-            self._env._add_warning(f"hot_reload failed: {exc}")
+            self._deadline = monotonic() + 0.5
+            self._condition.notify_all()
 
 
 def _normalize_path(path: str) -> str:

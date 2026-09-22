@@ -10,12 +10,15 @@ into a flat configuration mapping::
 
 The secret payload may be a JSON object — flattened with the same rules as the
 JSON source — or any plain string, which is served under the ``AWS_SECRET`` key.
+Binary secrets must contain UTF-8 text; SDK bytes are decoded directly while
+base64 string responses are decoded once before parsing the payload.
 The module imports :mod:`boto3` lazily, so a plain ``import smartenv.sources``
 never pulls it in.
 """
 
 from __future__ import annotations
 
+import base64
 import os
 from typing import Any, Dict, Optional
 
@@ -37,6 +40,8 @@ class AwsSource(CloudSource):
             ``AWS_REGION`` environment variable, falling back to
             ``"us-east-1"``.
         cache: When ``True``, the first successful fetch is cached and reused.
+        cache_ttl: Positive finite cache lifetime in seconds, or ``None`` for
+            indefinite caching. Expiration is checked when loading.
 
     Attributes:
         secret_name: Resolved secret name, or ``""`` when unset.
@@ -48,8 +53,9 @@ class AwsSource(CloudSource):
         secret_name: Optional[str] = None,
         region: Optional[str] = None,
         cache: bool = True,
+        cache_ttl: Optional[float] = None,
     ) -> None:
-        super().__init__(cache=cache)
+        super().__init__(cache=cache, cache_ttl=cache_ttl)
         self.secret_name = secret_name or os.environ.get("AWS_SECRET_NAME", "")
         self.region = region or os.environ.get("AWS_REGION", _DEFAULT_REGION)
         self._client: Any = None
@@ -83,18 +89,29 @@ class AwsSource(CloudSource):
                     f"({exc}); install it with: pip install smartenv[aws]"
                 ),
             ) from exc
-        if not self.secret_name:
+        if not self.secret_name.strip():
             raise CloudAuthError(
                 "aws", message="provide secret_name or set the AWS_SECRET_NAME environment variable"
             )
-        if self._client is None:
-            try:
-                self._client = boto3.client("secretsmanager", region_name=self.region)
-            except Exception as exc:
-                raise CloudAuthError("aws", reason=str(exc)) from exc
         try:
+            if self._client is None:
+                self._client = boto3.client("secretsmanager", region_name=self.region)
             response = self._client.get_secret_value(SecretId=self.secret_name)
+            if "SecretString" in response:
+                raw = response["SecretString"]
+                if not isinstance(raw, str):
+                    raise ValueError("SecretString must contain text")
+            elif "SecretBinary" in response:
+                binary = response["SecretBinary"]
+                # Botocore already decodes wire base64 into bytes. Support an
+                # encoded string response too, but never decode SDK bytes twice.
+                if isinstance(binary, str):
+                    binary = base64.b64decode(binary, validate=True)
+                if not isinstance(binary, (bytes, bytearray)):
+                    raise ValueError("SecretBinary must contain bytes or base64 text")
+                raw = binary.decode("utf-8")
+            else:
+                raise ValueError("response contains neither SecretString nor SecretBinary")
+            return parse_secret_payload(raw, default_key="AWS_SECRET")
         except Exception as exc:  # botocore exposes a deep, versioned hierarchy.
             raise CloudAuthError("aws", reason=str(exc)) from exc
-        raw = str(response.get("SecretString") or "")
-        return parse_secret_payload(raw, default_key="AWS_SECRET")

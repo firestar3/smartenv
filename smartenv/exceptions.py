@@ -19,6 +19,8 @@ from __future__ import annotations
 
 from typing import Any, Iterable, List, Optional
 
+from smartenv.security import is_sensitive_key, mask_value
+
 __all__ = [
     "SmartEnvError",
     "ValidationError",
@@ -123,9 +125,11 @@ class CastError(SmartEnvError):
 
     Attributes:
         key: Name of the offending key, or ``""`` when the caller did not supply one.
-        value: String form of the offending value.
+        value: String form of the offending value. This is unmasked; do not log it.
         target_type: The requested target type.
-        reason: Low level explanation, or ``""``.
+        reason: Unmasked low level explanation, or ``""``. Do not log it when
+            handling sensitive configuration. Display messages redact sensitive
+            values and reasons based on their key names.
     """
 
     def __init__(self, value: Any, target_type: Any, key: str = "", reason: str = "") -> None:
@@ -147,14 +151,18 @@ class CastError(SmartEnvError):
             A message such as ``"key 'PORT': cannot cast 'abc' to int (invalid literal...)"``.
         """
         prefix = f"key {self.key!r}: " if self.key else ""
-        message = f"{prefix}cannot cast {self.value!r} to {_type_name(self.target_type)}"
-        if self.reason:
+        display_value = mask_value(self.key, self.value)
+        message = f"{prefix}cannot cast {display_value!r} to {_type_name(self.target_type)}"
+        if self.reason and not is_sensitive_key(self.key):
             message = f"{message} ({self.reason})"
         return message
 
 
-class MissingKeyError(SmartEnvError):
-    """Raised when a required key is absent from the resolved configuration.
+class MissingKeyError(SmartEnvError, AttributeError, KeyError):
+    """Raised when a key is absent from the resolved configuration.
+
+    Also an ``AttributeError`` and ``KeyError``, allowing normal ``hasattr``,
+    ``getattr`` defaults, and dictionary-style exception handling.
 
     Args:
         key: Name of the missing key.
